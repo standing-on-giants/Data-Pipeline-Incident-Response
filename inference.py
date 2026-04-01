@@ -18,7 +18,8 @@ import sys
 import textwrap
 from typing import Any, Dict, List, Optional
 
-from groq import Groq as OpenAI    # alias to keep rest of file unchanged
+# from groq import Groq as OpenAI    # alias to keep rest of file unchanged
+from openai import OpenAI
 
 # Local environment import (no WebSocket needed for local inference)
 sys.path.insert(0, os.path.dirname(__file__))
@@ -29,9 +30,12 @@ from src.models import PipelineAction, PipelineObservation
 # Configuration
 # ------------------------------------------------------------------ #
 
-API_BASE_URL = None               # Groq client doesn't use base_url
-API_KEY      = os.getenv("GROQ_API_KEY") or os.getenv("API_KEY") or "MISSING_KEY"
-MODEL_NAME   = os.getenv("MODEL_NAME") or "llama-3.3-70b-versatile"
+# API_BASE_URL = None               # Groq client doesn't use base_url
+# API_KEY      = os.getenv("GROQ_API_KEY") or os.getenv("API_KEY") or "MISSING_KEY"
+# MODEL_NAME   = os.getenv("MODEL_NAME") or "llama-3.3-70b-versatile"
+API_BASE_URL = "http://localhost:11434/v1"
+API_KEY      = "ollama"   # Ollama doesn't validate this, but the client requires it
+MODEL_NAME   = os.getenv("MODEL_NAME") or "llama3"  # or mistral, phi3, etc.
 
 MAX_STEPS   = int(os.getenv("MAX_STEPS", "20"))
 TEMPERATURE = float(os.getenv("TEMPERATURE", "0.1"))
@@ -124,12 +128,29 @@ def build_user_prompt(obs: PipelineObservation, step: int) -> str:
         for r in obs.historical_runs
     )
 
+    # sample_str = ""
+    # if obs.data_sample:
+    #     sample_str = (
+    #         "\nDATA SAMPLE (last read):\n"
+    #         + json.dumps(obs.data_sample[:5], indent=2, default=str)
+    #     )
     sample_str = ""
     if obs.data_sample:
-        sample_str = (
-            "\nDATA SAMPLE (last read):\n"
-            + json.dumps(obs.data_sample[:5], indent=2, default=str)
-        )
+        # Show first 5 rows AND any rows with null values so model can see the problem
+        sample_rows = obs.data_sample[:5]
+        null_rows = [r for r in obs.data_sample if any(v is None for v in r.values())]
+        if null_rows:
+            sample_str = (
+                "\nDATA SAMPLE (first 5 rows):\n"
+                + json.dumps(sample_rows, indent=2, default=str)
+                + f"\nROWS WITH NULL VALUES ({len(null_rows)} found):\n"
+                + json.dumps(null_rows[:5], indent=2, default=str)
+            )
+        else:
+            sample_str = (
+                "\nDATA SAMPLE (first 5 rows):\n"
+                + json.dumps(sample_rows, indent=2, default=str)
+            )
 
     schema_str = ""
     if obs.current_schema:
@@ -138,6 +159,17 @@ def build_user_prompt(obs: PipelineObservation, step: int) -> str:
         schema_str += "\nSCHEMA DIFF vs HISTORICAL: " + json.dumps(obs.schema_diff)
 
     actions_str = "\n".join(f"  {a}" for a in obs.actions_taken[-5:]) or "  (none yet)"
+
+    # Detect if the model has been reading without acting
+    read_actions = sum(1 for a in obs.actions_taken if "read_data_sample" in a or "check_schema" in a)
+    fix_actions  = sum(1 for a in obs.actions_taken if "add_data_filter" in a or "patch_transformation" in a)
+    hint_str = ""
+    if read_actions >= 2 and fix_actions == 0:
+        hint_str = (
+            "\n⚠️  HINT: You have already read the data. "
+            "Stop diagnosing. Apply a fix now using add_data_filter or patch_transformation, "
+            "then call run_pipeline."
+        )
 
     return textwrap.dedent(f"""
     STEP {step}/{obs.max_steps}
@@ -159,7 +191,7 @@ def build_user_prompt(obs: PipelineObservation, step: int) -> str:
 
     RECENT ACTIONS TAKEN:
     {actions_str}
-    {sample_str}{schema_str}
+    {sample_str}{schema_str}{hint_str}
 
     Respond with exactly ONE action JSON object.
     """).strip()
@@ -211,7 +243,11 @@ def run_episode(
     env = DataPipelineEnv(task_id=task_id)
     obs = env.reset()
 
-    history: List[str]  = []
+    # history: List[str]  = []
+    # total_reward: float = 0.0
+    # steps_taken: int    = 0
+
+    conversation_history: List[Dict[str, str]] = []
     total_reward: float = 0.0
     steps_taken: int    = 0
 
@@ -229,11 +265,16 @@ def run_episode(
                 print(f"\n✅ Pipeline passed at step {step - 1}!")
             break
 
+        # user_prompt = build_user_prompt(obs, step)
+        # messages = [
+        #     {"role": "system", "content": SYSTEM_PROMPT},
+        #     {"role": "user",   "content": user_prompt},
+        # ]
         user_prompt = build_user_prompt(obs, step)
+        conversation_history.append({"role": "user", "content": user_prompt})
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user",   "content": user_prompt},
-        ]
+        ] + conversation_history
 
         try:
             completion = client.chat.completions.create(
@@ -250,9 +291,17 @@ def run_episode(
             response_text = ""
 
         action = parse_llm_response(response_text)
+        
+        conversation_history.append({"role": "assistant", "content": response_text or "{}"})
+        # Keep history bounded to last 10 turns to avoid token limit
+        if len(conversation_history) > 20:
+            conversation_history = conversation_history[-20:]
 
+        # if verbose:
+        #     print(f"\n[Step {step}] Action: {action.action_type}({action.params})")
         if verbose:
-            print(f"\n[Step {step}] Action: {action.action_type}({action.params})")
+            print(f"\n[Step {step}] Raw response: {response_text[:120]}")
+            print(f"[Step {step}] Action: {action.action_type}({action.params})")
 
         result = env.step(action)
         obs    = result.observation
@@ -306,8 +355,8 @@ def main():
                         help="Suppress per-step output")
     args = parser.parse_args()
 
-    # client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
-    client = OpenAI(api_key=API_KEY)
+    client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
+    # client = OpenAI(api_key=API_KEY)
 
     tasks = ["easy", "medium", "hard"] if args.task == "all" else [args.task]
 
