@@ -1,0 +1,101 @@
+name: data-pipeline-incident-response
+version: 1.0.0
+description: >
+  A real-world RL environment where an agent diagnoses and fixes broken
+  data pipelines. The agent observes failing data quality assertions,
+  inspects raw data samples and schemas, and applies targeted fixes
+  (filters, patches, escalations). Simulates the exact workflow of a
+  data engineer on-call responding to a 3am pipeline failure.
+
+authors:
+  - name: "AGI Quest Team"
+
+license: MIT
+
+tags:
+  - data-engineering
+  - incident-response
+  - data-quality
+  - real-world
+  - pipeline
+
+tasks:
+  - id: easy
+    description: >
+      Upstream raw_orders table gained a new nullable column that caused
+      5 out of 100 user_id values to become null. One NOT NULL assertion
+      fails. Fix by adding a null filter to the transform step.
+    difficulty: easy
+    max_steps: 20
+    n_assertions: 3
+
+  - id: medium
+    description: >
+      Vendor re-sent 20 duplicate rows in the order_items table.
+      Uniqueness assertion fails on order_item_id; downstream row count
+      on order_summary is inflated. Fix by deduplicating on order_item_id.
+    difficulty: medium
+    max_steps: 20
+    n_assertions: 4
+
+  - id: hard
+    description: >
+      Salesforce changed the revenue field format from "$1,234.56"
+      (string) to 1234.56 (float as string) mid-month. 12 rows contain
+      "N/A" (genuinely corrupted). 6 assertions fail across 4 tables.
+      Agent must apply a currency-parse patch for fixable rows AND alert
+      the upstream team for the corrupted rows.
+    difficulty: hard
+    max_steps: 20
+    n_assertions: 6
+
+observation_space:
+  type: structured
+  fields:
+    - task_id
+    - difficulty
+    - description
+    - step_number
+    - max_steps
+    - dag_structure
+    - failed_assertions
+    - passed_assertions
+    - historical_runs
+    - data_sample        # populated after read_data_sample action
+    - current_schema     # populated after check_schema action
+    - historical_schema  # populated after compare_schema action
+    - schema_diff        # populated after compare_schema action
+    - last_action_result
+    - actions_taken
+    - pipeline_passed
+    - alert_sent
+
+action_space:
+  type: discrete_structured
+  actions:
+    - read_data_sample
+    - check_schema
+    - compare_schema
+    - run_quality_assertion
+    - add_data_filter
+    - patch_transformation
+    - backfill_partition
+    - alert_upstream_team
+    - mark_acceptable
+    - run_pipeline
+
+reward:
+  shaped: true
+  range: [-inf, +1.0 terminal bonus per episode]
+  signals:
+    - "+0.4 per assertion gained on run_pipeline"
+    - "-0.5 per assertion lost on run_pipeline"
+    - "+1.0 terminal bonus when all assertions pass"
+    - "-0.5 shooting-blind penalty (modify step without reading data first)"
+    - "+0.5 for alerting correct upstream team (hard task)"
+    - "-1.0 for mark_acceptable on a genuinely failing assertion"
+
+openenv_spec: "0.1"
+websocket_endpoint: /ws
+health_endpoint: /health
+docker_image: data-pipeline-env:latest
