@@ -81,7 +81,7 @@ def apply_patch(df: pd.DataFrame, patch: Dict[str, Any]) -> pd.DataFrame:
         result[col] = pd.to_numeric(result[col], errors="coerce")
 
     elif p_type == "coalesce":
-        default = patch.get("default_value", 0)
+        default = patch.get("default_value") or 0
         result[col] = result[col].fillna(default)
 
     elif p_type == "dedup":
