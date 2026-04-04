@@ -1,45 +1,48 @@
 ---
-title: Legal Contract Review — OpenEnv
-colorFrom: blue
-colorTo: indigo
+title: Data Pipeline Incident Response — OpenEnv
+colorFrom: red
+colorTo: orange
 sdk: docker
 app_port: 7860
 tags:
   - openenv
-  - legal
+  - data-engineering
   - rl-environment
   - agentic
 license: mit
 ---
 
-# Legal Contract Review — OpenEnv
+# Data Pipeline Incident Response — OpenEnv
 
-An RL environment where an agent reviews legal contracts, identifies risks, detects missing clauses, and proposes fixes.
+An RL environment where an agent acts as an on-call Data Engineer, diagnosing broken pipelines, investigating data quality issues, and applying root-cause fixes.
 
 ---
 
 ## Motivation
 
-Legal teams review contracts daily — NDAs, SaaS agreements, M&A term sheets. Missing a liability cap or a buried auto-renewal clause can cost organisations millions. This environment simulates that workflow: the agent acts as a junior associate, reading sections sequentially, flagging risky or non-standard clauses, detecting absent protections, suggesting replacement language, and producing a final signed-off review.
+Data teams deal with broken pipelines daily. A vendor silently changes an API export format, null values suddenly appear in critical source tables, or duplicate rows inflate financial aggregations downstream. Fixing these issues requires more than just code generation — it requires **investigating data dynamically**. 
 
-The environment benchmarks agentic LLMs on tasks that require **sequential reasoning under a step budget**, **precision** (false positives are penalised), and **discrimination** between genuinely risky clauses and market-standard ones.
+In this environment, the agent receives an alert with failing assertions in a DAG. It must query the data (`read_data_sample`, `check_schema`) to figure out what went wrong, apply the correct transformation patch (`add_data_filter`, `patch_transformation`), verify the fix by re-running the pipeline, and know when to escalate genuinely corrupted data upstream. 
+
+The environment benchmarks agentic LLMs on tasks that require **data-driven reasoning**, **iterative debugging**, and making the distinction between locally fixable bugs and upstream data corruption.
 
 ---
 
 ## Project Structure
 
 ```
-legal_contract_env/
+data_pipeline_env/
 ├── Dockerfile
 ├── openenv.yaml
 ├── requirements.txt
-├── inference.py          Agent loop, prompt builder, action parser (local use)
+├── new_inference.py      Agent loop, prompt builder, action parser (local use)
 └── src/
     ├── __init__.py
-    ├── contracts.py      Synthetic contracts + ground-truth fault manifests
     ├── environment.py    OpenEnv-compliant env (reset / step / state)
-    ├── grader.py         Deterministic grader (F1-weighted, recall-focused)
-    ├── models.py         Pydantic models (ContractAction, ContractObservation, …)
+    ├── pipeline_runner.py Simulates DAG execution and data transformations 
+    ├── assertions.py      Deterministic data quality grader
+    ├── tasks.py          Task definitions (DAGs, faults, schemas)
+    ├── models.py         Pydantic models (PipelineAction, PipelineObservation, …)
     └── server.py         FastAPI REST wrapper
 ```
 
@@ -50,26 +53,25 @@ legal_contract_env/
 ### Local (Docker)
 
 ```bash
-docker build -t legal-contract-env .
-docker run -p 7860:7860 legal-contract-env
+docker build -t data-pipeline-env .
+docker run -p 7860:7860 data-pipeline-env
 ```
 
-### Local (Python)
+### Local (Python conda/venv)
 
 ```bash
-python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
 uvicorn src.server:app --host 0.0.0.0 --port 7860
 ```
 
 ### Hugging Face Space
 
-Push this repo to a Hugging Face Space with `sdk: docker` in the README frontmatter (already set above). The Space builds and serves automatically.
+Push this repo to a Hugging Face Space with `sdk: docker` in the README frontmatter. The Space builds and serves automatically.
 
 ```bash
-git clone https://huggingface.co/spaces/<your-org>/legal-contract-review
-cp -r . legal-contract-review/
-cd legal-contract-review
+git clone https://huggingface.co/spaces/<your-org>/data-pipeline-incident-response
+cp -r . data-pipeline-incident-response/
+cd data-pipeline-incident-response
 git add . && git commit -m "initial" && git push
 ```
 
@@ -77,15 +79,15 @@ git add . && git commit -m "initial" && git push
 
 ## Environment variables (local inference only)
 
-These are only needed when running `inference.py` locally. The Space itself has no model dependency — it only serves the environment API.
+These are only needed when running `new_inference.py` locally. The Space itself has no model dependency — it only serves the environment API.
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `GROQ_API_KEY` | Yes (local) | — | API key for Groq inference |
-| `MODEL_NAME` | No | `llama-3.3-70b-versatile` | Model override |
-| `MAX_STEPS` | No | `30` | Max steps per episode |
+| `GEMINI_API_KEY` | Yes (local) | — | API key for Gemini inference |
+| `MODEL_NAME` | No | `gemini-2.5-flash` | Model override |
+| `MAX_STEPS` | No | `20` | Max steps per episode |
 | `TEMPERATURE` | No | `0.1` | Sampling temperature |
-| `MAX_TOKENS` | No | `500` | Max tokens per LLM call |
+| `MAX_TOKENS` | No | `1024` | Max tokens per LLM call |
 
 ---
 
@@ -103,7 +105,7 @@ curl http://localhost:7860/tasks
 # Start a session
 curl -X POST http://localhost:7860/reset \
   -H "Content-Type: application/json" \
-  -d '{"task_id": "easy", "max_steps": 30}'
+  -d '{"task_id": "easy", "max_steps": 20}'
 # → {"session_id": "easy_...", "observation": {...}}
 
 # Take a step
@@ -112,8 +114,8 @@ curl -X POST http://localhost:7860/step \
   -d '{
     "session_id": "<session_id from reset>",
     "action": {
-      "action_type": "read_section",
-      "params": {"section": "obligations"}
+      "action_type": "read_data_sample",
+      "params": {"table": "raw_orders", "n_rows": 20}
     }
   }'
 
@@ -124,13 +126,13 @@ curl "http://localhost:7860/state?session_id=<session_id>"
 ### Local agent runner
 
 ```bash
-pip install ollama   # in addition to requirements.txt
-export GROQ_API_KEY="your_key_here"
+pip install openai python-dotenv   # in addition to requirements.txt
+# Set your GEMINI_API_KEY in the .env file
 
-python inference.py              # all three tasks
-python inference.py --task easy
-python inference.py --task hard --steps 35
-python inference.py --quiet      # suppress per-step output
+python new_inference.py              # all three tasks
+python new_inference.py --task easy
+python new_inference.py --task hard --steps 25
+python new_inference.py --quiet      # suppress per-step output
 ```
 
 ---
@@ -138,140 +140,99 @@ python inference.py --quiet      # suppress per-step output
 ## Environment Description
 
 ```python
-from src.environment import LegalContractEnv
-from src.models import ContractAction
+from src.environment import DataPipelineEnv
+from src.models import PipelineAction
 
-env = LegalContractEnv(task_id="easy")  # "easy" | "medium" | "hard"
-obs = env.reset()                        # → ContractObservation
+env = DataPipelineEnv(task_id="easy")    # "easy" | "medium" | "hard"
+obs = env.reset()                        # → PipelineObservation
 result = env.step(action)                # → StepResult
 state = env.state()                      # → Dict
 ```
 
-Episode ends when the agent calls `summarize` or the step budget is exhausted. `pipeline_passed = True` when the grader score ≥ 0.6.
+Episode ends when all assertions pass (`pipeline_passed=True`) or the step budget is exhausted.
 
 ---
 
 ## Observation Space
 
-`ContractObservation` fields:
+`PipelineObservation` fields:
 
 | Field | Type | Description |
 |---|---|---|
 | `task_id` | `str` | `"easy"`, `"medium"`, or `"hard"` |
 | `difficulty` | `str` | Human-readable difficulty label |
-| `description` | `str` | Task description |
+| `description` | `str` | Task context (what broke) |
 | `max_steps` | `int` | Step budget |
-| `contract_title` | `str` | Title of the contract under review |
-| `available_sections` | `List[str]` | All section names |
-| `section_statuses` | `List[SectionStatus]` | Per-section read / approved / flag state |
-| `current_section_text` | `Optional[str]` | Full text of the last read section |
-| `current_section_name` | `Optional[str]` | Name of the last read section |
-| `flags` | `List[AgentFlag]` | All flags raised so far |
-| `actions_taken` | `List[str]` | Recent action history (last 8) |
-| `last_action_result` | `str` | Result of the last action |
-| `step` | `int` | Current step number |
-| `done` | `bool` | Whether the episode has ended |
-| `pipeline_passed` | `bool` | `True` when score ≥ 0.6 after `summarize` |
-| `total_faults_in_contract` | `int` | Ground-truth fault count (traps excluded) |
-| `faults_found_so_far` | `int` | Real faults matched so far |
-
-`SectionStatus`: `section_name`, `read`, `approved`, `flags_count`
-
-`AgentFlag`: `section`, `clause_id`, `flag_type` (`"risky"` / `"missing"`), `risk_level`, `reason`, `redline_suggested`
+| `dag_structure` | `List[DAGNode]` | The pipeline graph (steps + schemas) |
+| `failed_assertions` | `List[AssertionResult]` | Current failing Data Quality checks |
+| `passed_assertions` | `List[AssertionResult]` | Current passing Data Quality checks |
+| `historical_runs` | `List[HistoricalRun]` | Pipeline history spanning several days |
+| `data_sample` | `Optional[List[Dict]]` | Populated when `read_data_sample` is called |
+| `current_schema` | `Optional[Dict]` | Populated when `check_schema` is called |
+| `historical_schema` | `Optional[Dict]` | Populated when `compare_schema` is called |
+| `actions_taken` | `List[str]` | Recent action history |
+| `last_action_result` | `str` | Textual result of the last action |
+| `step_number` | `int` | Current step number |
+| `pipeline_passed` | `bool` | `True` when all assertions pass |
 
 ---
 
 ## Action Space
 
-| Action | Params | Reward |
+| Action | Params | Purpose |
 |---|---|---|
-| `read_section` | `section` | +0.05 |
-| `flag_clause` | `section`, `clause_id`, `risk_level`, `reason` | +0.10 |
-| `mark_missing` | `section`, `clause_id`, `risk_level`, `reason` | +0.10 |
-| `suggest_redline` | `clause_id`, `replacement_text` | +0.05 |
-| `approve_section` | `section` | +0.02 |
-| `summarize` | *(none)* | grader reward |
+| `read_data_sample` | `table`, `n_rows` | Diagnose by inspecting actual rows |
+| `check_schema` | `table` | Diagnose by checking current column dtypes |
+| `compare_schema` | `table` | Diff current vs historical schema to spot drift |
+| `add_data_filter` | `step_id`, `filter_condition` | Fix: drop bad records (e.g., `user_id IS NOT NULL`) |
+| `patch_transformation` | `step_id`, `patch_type`, `column` | Fix: clean data in place (`coalesce`, `dedup`, `parse_currency`) |
+| `run_pipeline` | *(none)* | Recompiles and triggers DAG, generating new assertion states |
+| `alert_upstream_team` | `team`, `issue_description` | Correctly escalate unfixable upstream corruption |
+| `mark_acceptable` | `assertion_id`, `reason` | *(Anti-pattern)* Mark a failing assertion as ignored |
 
-Penalty of −0.20 if `flag_clause` or `mark_missing` is called on a section that has not been read first.
-
----
-
-## Grading
-
-Score formula (computed at `summarize`):
-
-```
-recall    = true_positives / total_real_faults
-precision = true_positives / (true_positives + false_positives)
-f_score   = 2 × recall × precision / (recall + precision)
-score     = max(0, f_score − 0.3 × missed_criticals / total_faults)
-```
-
-Grader rewards at `summarize`:
-
-| Event | Reward |
-|---|---|
-| True positive — critical | +0.80 |
-| True positive — medium | +0.60 |
-| True positive — low | +0.40 |
-| Correct `risk_level` | +0.10 |
-| Redline matches standard language | +0.30 |
-| Missed critical fault | −1.00 |
+**Rewards:** Checking data is mildly penalized for spamming (`-0.05`), shooting blind (adding filters without reading data) is heavily penalized (`-0.5`), correctly escalating unfixable data gains `+0.5`, and fixing the pipeline gains points based on new assertions passing vs failing. Passing the full pipeline gives a `+1.0` bonus.
 
 ---
 
 ## Task Descriptions
 
-### easy — Mutual NDA
+### easy — Null Values
 
-Sections: `parties`, `purpose`, `definition_confidential`, `obligations`, `term`, `governing_law`, `general`
-
-| Fault | Type | Section | Risk |
-|---|---|---|---|
-| Missing liability cap | Missing clause | `obligations` | Critical |
-| Uncapped one-sided indemnification | Risky clause | `obligations` | Critical |
-
-**Difficulty:** Both faults are in the same section and readable on a single pass. Expected to be caught within 15 steps.
+| Issue | Details |
+|---|---|
+| **Fault** | Upstream table added a `discount_code` column, accidentally null-ing out `user_id` for 5 random rows. |
+| **Symptom** | `NOT NULL` assertion failing on `orders_clean.user_id`. |
+| **Solution** | `add_data_filter` (`user_id IS NOT NULL`) |
 
 ---
 
-### medium — SaaS Subscription Agreement
+### medium — Duplicated Rows
 
-Sections: `definitions`, `license_grant`, `fees_payment`, `data_privacy`, `intellectual_property`, `warranties`, `limitation_liability`, `term_termination`, `general`
-
-| Fault | Type | Section | Risk |
-|---|---|---|---|
-| Auto-renewal + 15% price escalation buried in Definitions | Risky clause | `definitions` | Medium |
-| Irrevocable perpetual sublicensable data license surviving termination | Risky clause | `intellectual_property` | Critical |
-| No SLA or uptime commitment | Missing clause | `data_privacy` | Medium |
-
-**Difficulty:** Moderate. Requires recognising a predatory drafting pattern and detecting a missing clause by absence.
+| Issue | Details |
+|---|---|
+| **Fault** | Vendor sent 20 duplicate order items for yesterday. |
+| **Symptom** | Unique constraint fails on `order_item_id`, and `order_summary` row counts are inflated. |
+| **Solution** | `patch_transformation` (type=`dedup`, column=`order_item_id`) on the `transform_items` step. |
 
 ---
 
-### hard — M&A Term Sheet
+### hard — Format Change & Upstream Corruption
 
-Sections: `transaction_summary`, `purchase_price_adjustment`, `representations_warranties`, `indemnification`, `intellectual_property`, `employee_matters`, `conditions_closing`, `exclusivity_no_shop`, `schedule_a_open_source`, `schedule_b_earnout_definition`
-
-| Fault | Type | Section | Risk |
-|---|---|---|---|
-| GPLv3 copyleft: 34% of codebase, triggers on distribution | Risky clause | `schedule_a_open_source` | Critical |
-| Earnout ARR in Acquirer's sole discretion + CFO gate on channel revenue | Risky clause | `schedule_b_earnout_definition` | Medium |
-| No R&W insurance | Missing clause | `conditions_closing` | Medium |
-| 1% tipping basket *(trap — market standard, do not flag)* | — | `indemnification` | — |
-| 18-month rep survival *(trap — market standard, do not flag)* | — | `representations_warranties` | — |
-
-**Difficulty:** Hard. The agent must read schedules, understand GPLv3 copyleft mechanics, and correctly avoid flagging the two trap clauses.
+| Issue | Details |
+|---|---|
+| **Fault** | Salesforce changed the `revenue` format mid-month from `"$1,234.56"` string to float, breaking downstream aggregations. Simultaneously, 12 rows were exported with `"N/A"` revenue. |
+| **Symptom** | 6 assertions fail across 4 tables (type mismatch, range failures due to strings, 0 aggregations due to NaNs). |
+| **Solution** | Needs a chain pipeline fix: First `patch_transformation` (type=`parse_currency`), then chain another `patch_transformation` (type=`coalesce`) on the same column to convert parsed NaNs to 0s, and finally `alert_upstream_team` (team=`salesforce_ops`) for the unfixable N/A rows. |
 
 ---
 
 ## Baseline Scores
 
-Model: `glm-5:cloud` via Ollama. `MAX_STEPS=30`, `TEMPERATURE=0.1`.
+Model: `gemini-2.5-pro`. `MAX_STEPS=20`, `TEMPERATURE=0.1`.
 
-| Task | Score | Reward | Steps | Faults caught | Passed |
+| Task | Score | Reward | Steps | Assertions Passed | Passed |
 |---|---|---|---|---|---|
-| easy | 1.00 | +2.82 | 15 | 2 / 2 | Yes |
-| medium | 1.00 | +3.60 | 25 | 3 / 3 | Yes |
-| hard | 1.00 | +4.19 | 24 | 3 / 3 | Yes |
-| **average** | **1.00** | **+3.54** | **21** | — | **3 / 3** |
+| easy | 1.00 | +1.35 | 3 | 3 / 3 | Yes |
+| medium | 1.00 | +1.75 | 3 | 4 / 4 | Yes |
+| hard | 1.00 | +2.15 | 5 | 6 / 6 | Yes |
+| **average** | **1.00** | **+1.75** | **3.67** | — | **3 / 3** |
