@@ -40,7 +40,7 @@ API_BASE_URL   = "https://generativelanguage.googleapis.com/v1beta/openai/"
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or "MISSING_KEY"
 MODEL_NAME     = os.getenv("MODEL_NAME") or "gemini-2.5-flash"
 
-MAX_STEPS      = int(os.getenv("MAX_STEPS", "20"))
+MAX_STEPS      = int(os.getenv("MAX_STEPS", "30"))
 TEMPERATURE    = float(os.getenv("TEMPERATURE", "0.1"))
 MAX_TOKENS     = int(os.getenv("MAX_TOKENS", "1024"))
 
@@ -81,12 +81,13 @@ AVAILABLE ACTIONS (respond with ONLY a JSON object, no markdown, no prose):
 
 KEY PATCH TYPES (you can chain multiple patches on the same step — they run in order):
 - parse_currency: Use when a column has mixed formats like "$1,234.56" and "1234.56" and "N/A".
-  It strips $, commas, casts to float, and converts N/A to NaN. USE THIS for revenue/spend columns.
+  It strips $, commas, casts to float, and converts N/A to NaN. Works on ANY column with "N/A" strings,
+  not just currency — e.g. if a numeric column like impressions has "N/A" values, use parse_currency on it.
 - coalesce: Use AFTER parse_currency to replace NaN/null with a default value (default is 0).
   IMPORTANT: After parse_currency, NaN values will cause value_range assertions to fail.
   You MUST chain a coalesce patch to fix this: {"action_type": "patch_transformation", "params": {"step_id": "<same_step>", "patch_type": "coalesce", "column": "<same_column>"}}
-  NOTE: parse_currency works on ANY column with "N/A" string values, not just currency columns.
-  If impressions or clicks have "N/A" strings, use parse_currency on them too.
+  If coalescing a denominator column (e.g. impressions used in CTR = clicks/impressions), coalescing to 0
+  will cause division by zero. Instead, filter out those rows: add_data_filter with "column IS NOT NULL".
 - cast_column: Use when a column needs simple numeric casting.
 - dedup: Use when there are duplicate rows based on a key column.
 - strip_prefix: Use when column values have a spurious prefix like "CMP_" that needs removal.
@@ -103,7 +104,13 @@ RULES:
 - Do NOT apply a fix before reading the data — this will be penalised.
 - NEVER use mark_acceptable. It always results in a heavy penalty. Instead, fix the data.
 - After parse_currency, ALWAYS chain coalesce on the same column to handle NaN values before calling run_pipeline.
-- If pipeline_passed is true, you are done.
+- If a computed column (like CTR) has a value_range failure, check ALL input columns in its formula.
+  For example, if CTR = clicks/impressions and impressions has "N/A" strings, you must fix impressions
+  with parse_currency first, then filter out null rows, before the computed column can produce valid values.
+- If a joined output table has 0 rows (row_count assertion failing), the join keys likely don't match.
+  Use compare_schema on the input tables to detect type/format drifts like string vs int, or unwanted
+  prefixes on the join key. Apply strip_prefix + cast_column to align the keys.
+- If pipeline_passed is true, you are done — unless the task description mentions alerting an upstream team.
 """).strip()
 
 
@@ -198,40 +205,6 @@ def build_user_prompt(obs: PipelineObservation, step: int) -> str:
             "You MUST apply a fix (patch_transformation or add_data_filter) before calling run_pipeline again."
         )
 
-    # Detect CTR / computed column failures on the hard task
-    ctr_failing = any(
-        r.assertion_id == "H3" and r.assertion_type == "value_range"
-        for r in obs.failed_assertions
-    )
-    impressions_parsed = any("parse_currency" in a and "impressions" in a for a in obs.actions_taken)
-    impressions_filtered = any("impressions IS NOT NULL" in a for a in obs.actions_taken)
-    if ctr_failing and not impressions_parsed:
-        hint_str += (
-            "\n** CRITICAL: The CTR assertion (H3) is FAILING because CTR = clicks / impressions, "
-            "and the impressions column contains 'N/A' string values from a Graph API outage. "
-            "'N/A' is NOT null -- it is a string. You cannot filter it with 'impressions > 0'. "
-            "You MUST apply parse_currency on 'impressions' column in 'transform_insights' first "
-            "(parse_currency converts 'N/A' strings to NaN), THEN filter out rows where "
-            "impressions became null: "
-            '{\"action_type\": \"add_data_filter\", \"params\": {\"step_id\": \"transform_insights\", '
-            '\"filter_condition\": \"impressions IS NOT NULL\"}}'
-        )
-    elif ctr_failing and impressions_parsed and not impressions_filtered:
-        hint_str += (
-            "\n** CRITICAL: After parse_currency on impressions, the N/A values became NaN. "
-            "You MUST filter out null impressions rows now: "
-            '{\"action_type\": \"add_data_filter\", \"params\": {\"step_id\": \"transform_insights\", '
-            '\"filter_condition\": \"impressions IS NOT NULL\"}}'
-        )
-
-    # Detect if agent should alert upstream on hard task
-    all_pass_no_alert = obs.pipeline_passed and obs.task_id == "hard"
-    alert_done = any("alert_upstream_team" in a for a in obs.actions_taken)
-    if all_pass_no_alert and not alert_done:
-        hint_str += (
-            "\n** IMPORTANT: Pipeline passed! But you must also alert the upstream team. "
-            "The N/A values came from a Graph API outage. Alert meta_ads_api_team."
-        )
 
     return textwrap.dedent(f"""
     STEP {step}/{obs.max_steps}
@@ -411,6 +384,16 @@ def run_episode(
             response_text = ""
 
         action = parse_llm_response(response_text)
+
+        # Smart fallback: if model returned empty/garbage and action is run_pipeline,
+        # convert the wasted step into a diagnostic compare_schema instead
+        if action.action_type == "run_pipeline" and not response_text.strip():
+            if obs.failed_assertions:
+                target_table = obs.failed_assertions[0].table
+                action = PipelineAction(
+                    action_type="compare_schema",
+                    params={"table": target_table}
+                )
         
         conversation_history.append({"role": "assistant", "content": response_text or "{}"})
         # Keep history bounded to last 20 messages to avoid token limit
