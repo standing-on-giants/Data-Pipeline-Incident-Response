@@ -73,7 +73,7 @@ AVAILABLE ACTIONS (respond with ONLY a JSON object, no markdown, no prose):
 {"action_type": "compare_schema", "params": {"table": "<table_name>"}}
 {"action_type": "run_quality_assertion", "params": {"assertion_id": "<e.g. A1>"}}
 {"action_type": "add_data_filter", "params": {"step_id": "<step_id>", "filter_condition": "<e.g. user_id IS NOT NULL>"}}
-{"action_type": "patch_transformation", "params": {"step_id": "<step_id>", "patch_type": "<cast_column|coalesce|dedup|parse_currency>", "column": "<column_name>"}}
+{"action_type": "patch_transformation", "params": {"step_id": "<step_id>", "patch_type": "<cast_column|coalesce|dedup|parse_currency|strip_prefix>", "column": "<column_name>"}}
 {"action_type": "backfill_partition", "params": {"date": "<YYYY-MM-DD>"}}
 {"action_type": "alert_upstream_team", "params": {"team": "<team_name_snake_case>", "issue_description": "<short description>"}}
 {"action_type": "mark_acceptable", "params": {"assertion_id": "<id>", "reason": "<reason>"}}
@@ -81,16 +81,21 @@ AVAILABLE ACTIONS (respond with ONLY a JSON object, no markdown, no prose):
 
 KEY PATCH TYPES (you can chain multiple patches on the same step — they run in order):
 - parse_currency: Use when a column has mixed formats like "$1,234.56" and "1234.56" and "N/A".
-  It strips $, commas, casts to float, and converts N/A to NaN. USE THIS for revenue/price columns.
+  It strips $, commas, casts to float, and converts N/A to NaN. USE THIS for revenue/spend columns.
 - coalesce: Use AFTER parse_currency to replace NaN/null with a default value (default is 0).
   IMPORTANT: After parse_currency, NaN values will cause value_range assertions to fail.
   You MUST chain a coalesce patch to fix this: {"action_type": "patch_transformation", "params": {"step_id": "<same_step>", "patch_type": "coalesce", "column": "<same_column>"}}
+  NOTE: parse_currency works on ANY column with "N/A" string values, not just currency columns.
+  If impressions or clicks have "N/A" strings, use parse_currency on them too.
 - cast_column: Use when a column needs simple numeric casting.
 - dedup: Use when there are duplicate rows based on a key column.
+- strip_prefix: Use when column values have a spurious prefix like "CMP_" that needs removal.
+  Params: step_id, column. Optionally "prefix" (default "CMP_"). After stripping, chain cast_column
+  if the underlying value should be numeric.
 
 UPSTREAM TEAM NAMING:
-- Team names are always lowercase snake_case. Examples: salesforce_ops, data_engineering, vendor_support.
-- If the description mentions "Salesforce", the team is likely "salesforce_ops".
+- Team names are always lowercase snake_case. Examples: meta_ads_api_team, data_engineering, vendor_support.
+- If the description mentions "Meta", "Graph API", or "Meta Ads", the team is likely "meta_ads_api_team".
 
 RULES:
 - RESPOND WITH ONLY A JSON OBJECT. No markdown fences, no explanation, no prose.
@@ -175,8 +180,8 @@ def build_user_prompt(obs: PipelineObservation, step: int) -> str:
         hint_str += (
             "\n🚨 CRITICAL: A value_range assertion is STILL failing because parse_currency converts "
             "unparseable values (like 'N/A') to NaN, and NaN counts as out-of-range. "
-            "You MUST apply a coalesce patch to replace NaN with 0: "
-            '{"action_type": "patch_transformation", "params": {"step_id": "transform_crm", "patch_type": "coalesce", "column": "revenue"}}'
+            "You MUST apply a coalesce patch to replace NaN with 0 on the same column and step "
+            "where you applied parse_currency."
         )
     # Detect mark_acceptable abuse
     if mark_actions >= 1:
@@ -191,6 +196,41 @@ def build_user_prompt(obs: PipelineObservation, step: int) -> str:
         hint_str += (
             "\n🚨 CRITICAL: You have called run_pipeline multiple times with no progress. "
             "You MUST apply a fix (patch_transformation or add_data_filter) before calling run_pipeline again."
+        )
+
+    # Detect CTR / computed column failures on the hard task
+    ctr_failing = any(
+        r.assertion_id == "H3" and r.assertion_type == "value_range"
+        for r in obs.failed_assertions
+    )
+    impressions_parsed = any("parse_currency" in a and "impressions" in a for a in obs.actions_taken)
+    impressions_filtered = any("impressions IS NOT NULL" in a for a in obs.actions_taken)
+    if ctr_failing and not impressions_parsed:
+        hint_str += (
+            "\n** CRITICAL: The CTR assertion (H3) is FAILING because CTR = clicks / impressions, "
+            "and the impressions column contains 'N/A' string values from a Graph API outage. "
+            "'N/A' is NOT null -- it is a string. You cannot filter it with 'impressions > 0'. "
+            "You MUST apply parse_currency on 'impressions' column in 'transform_insights' first "
+            "(parse_currency converts 'N/A' strings to NaN), THEN filter out rows where "
+            "impressions became null: "
+            '{\"action_type\": \"add_data_filter\", \"params\": {\"step_id\": \"transform_insights\", '
+            '\"filter_condition\": \"impressions IS NOT NULL\"}}'
+        )
+    elif ctr_failing and impressions_parsed and not impressions_filtered:
+        hint_str += (
+            "\n** CRITICAL: After parse_currency on impressions, the N/A values became NaN. "
+            "You MUST filter out null impressions rows now: "
+            '{\"action_type\": \"add_data_filter\", \"params\": {\"step_id\": \"transform_insights\", '
+            '\"filter_condition\": \"impressions IS NOT NULL\"}}'
+        )
+
+    # Detect if agent should alert upstream on hard task
+    all_pass_no_alert = obs.pipeline_passed and obs.task_id == "hard"
+    alert_done = any("alert_upstream_team" in a for a in obs.actions_taken)
+    if all_pass_no_alert and not alert_done:
+        hint_str += (
+            "\n** IMPORTANT: Pipeline passed! But you must also alert the upstream team. "
+            "The N/A values came from a Graph API outage. Alert meta_ads_api_team."
         )
 
     return textwrap.dedent(f"""

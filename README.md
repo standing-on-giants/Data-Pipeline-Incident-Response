@@ -216,13 +216,16 @@ Episode ends when all assertions pass (`pipeline_passed=True`) or the step budge
 
 ---
 
-### hard — Format Change & Upstream Corruption
+### hard — Meta Ads & Conversions Pipeline (Cascading Failures)
 
 | Issue | Details |
 |---|---|
-| **Fault** | Salesforce changed the `revenue` format mid-month from `"$1,234.56"` string to float, breaking downstream aggregations. Simultaneously, 12 rows were exported with `"N/A"` revenue. |
-| **Symptom** | 6 assertions fail across 4 tables (type mismatch, range failures due to strings, 0 aggregations due to NaNs). |
-| **Solution** | Needs a chain pipeline fix: First `patch_transformation` (type=`parse_currency`), then chain another `patch_transformation` (type=`coalesce`) on the same column to convert parsed NaNs to 0s, and finally `alert_upstream_team` (team=`salesforce_ops`) for the unfixable N/A rows. |
+| **Fault 1** | Graph API v19.0 changed `spend` to `"$1,234.56"` strings. ~10 rows have `"N/A"` from API outage. |
+| **Fault 2** | `impressions` has `"N/A"` values; coalescing to 0 causes CTR divide-by-zero (Inf/NaN). |
+| **Fault 3** | Conversions API retried failed payloads → ~37 duplicate `event_id` rows (15%). |
+| **Fault 4** | `campaign_id` in conversions has `"CMP_"` prefix; insights uses int → ROAS join drops 90%+ of rows. |
+| **Symptom** | 8 assertions fail across 3 output tables: type/range on `spend`, range on `ctr`, unique/row_count on conversions, row_count/range on `roas_summary`. |
+| **Solution** | Sequential: `parse_currency` + `coalesce` on `spend`, `parse_currency` + `coalesce(1)` on `impressions`, `dedup` on `event_id`, `strip_prefix` + `cast_column` on conversions `campaign_id`, + `alert_upstream_team(meta_ads_api_team)`. |
 
 ---
 
@@ -234,5 +237,5 @@ Model: `gemini-2.5-pro`. `MAX_STEPS=20`, `TEMPERATURE=0.1`.
 |---|---|---|---|---|---|
 | easy | 1.00 | +1.35 | 3 | 3 / 3 | Yes |
 | medium | 1.00 | +1.75 | 3 | 4 / 4 | Yes |
-| hard | 1.00 | +2.15 | 5 | 6 / 6 | Yes |
-| **average** | **1.00** | **+1.75** | **3.67** | — | **3 / 3** |
+| hard | — | — | — | — / 8 | TBD |
+| **average** | **—** | **—** | **—** | — | **—** |

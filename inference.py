@@ -79,7 +79,7 @@ AVAILABLE ACTIONS (respond with valid JSON only):
 
 {"action_type": "patch_transformation",
  "params": {"step_id": "<step_id>",
-            "patch_type": "<cast_column|coalesce|dedup|parse_currency>",
+            "patch_type": "<cast_column|coalesce|dedup|parse_currency|strip_prefix>",
             "column": "<column_name>"}}
 
 {"action_type": "backfill_partition",
