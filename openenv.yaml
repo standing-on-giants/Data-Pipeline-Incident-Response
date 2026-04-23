@@ -40,14 +40,14 @@ tasks:
 
   - id: hard
     description: >
-      Salesforce changed the revenue field format from "$1,234.56"
-      (string) to 1234.56 (float as string) mid-month. 12 rows contain
-      "N/A" (genuinely corrupted). 6 assertions fail across 4 tables.
-      Agent must apply a currency-parse patch for fixable rows AND alert
-      the upstream team for the corrupted rows.
+      Meta Ads pipeline ingesting Graph API Ads Insights and Conversions
+      API purchase events. Four cascading failures: spend schema drift
+      (strings), impressions N/A causing CTR div-by-zero, CAPI retry
+      duplicate events, and a campaign_id prefix mismatch breaking the
+      ROAS join. Agent must fix sequentially and alert upstream team.
     difficulty: hard
     max_steps: 20
-    n_assertions: 6
+    n_assertions: 8
 
 observation_space:
   type: structured

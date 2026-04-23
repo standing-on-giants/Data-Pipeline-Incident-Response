@@ -65,10 +65,11 @@ def apply_patch(df: pd.DataFrame, patch: Dict[str, Any]) -> pd.DataFrame:
     Apply a column-level transformation patch.
 
     Supported patch_types:
-      cast_column   : cast column to float (coerce errors → NaN)
+      cast_column   : cast column to float (coerce errors -> NaN)
       coalesce      : replace NaN with default_value
       dedup         : keep first occurrence of column
-      parse_currency: strip "$", "," then cast to float; "N/A" → NaN
+      parse_currency: strip "$", "," then cast to float; "N/A" -> NaN
+      strip_prefix  : strip a string prefix (e.g. "CMP_") from values
     """
     p_type  = patch.get("patch_type", "")
     col     = patch.get("column")
@@ -81,7 +82,7 @@ def apply_patch(df: pd.DataFrame, patch: Dict[str, Any]) -> pd.DataFrame:
         result[col] = pd.to_numeric(result[col], errors="coerce")
 
     elif p_type == "coalesce":
-        default = patch.get("default_value", 0)
+        default = patch.get("default_value") or 0
         result[col] = result[col].fillna(default)
 
     elif p_type == "dedup":
@@ -103,6 +104,42 @@ def apply_patch(df: pd.DataFrame, patch: Dict[str, Any]) -> pd.DataFrame:
 
         result[col] = result[col].apply(_parse)
 
+    elif p_type == "strip_prefix":
+        prefix = patch.get("prefix", "CMP_")
+        def _strip(v):
+            if v is None:
+                return v
+            try:
+                if pd.isna(v):
+                    return v
+            except (TypeError, ValueError):
+                pass
+            s = str(v).strip()
+            if s.startswith(prefix):
+                return s[len(prefix):]
+            return s
+        result[col] = result[col].apply(_strip)
+
+    return result
+
+
+# ------------------------------------------------------------------ #
+# Computed columns (e.g. CTR = clicks / impressions)
+# ------------------------------------------------------------------ #
+
+def _compute_columns(df: pd.DataFrame, computed: List[Dict[str, str]]) -> pd.DataFrame:
+    """Evaluate computed column expressions after patches are applied."""
+    result = df.copy()
+    for spec in computed:
+        name    = spec["name"]
+        formula = spec["formula"]
+        # Supported: "col_a / col_b"
+        if "/" in formula:
+            parts = [p.strip() for p in formula.split("/")]
+            if len(parts) == 2 and parts[0] in result.columns and parts[1] in result.columns:
+                num = pd.to_numeric(result[parts[0]], errors="coerce")
+                den = pd.to_numeric(result[parts[1]], errors="coerce")
+                result[name] = num / den  # produces Inf / NaN on zero
     return result
 
 
@@ -126,29 +163,43 @@ def execute_pipeline(
         select_cols = step.get("select_columns")
         filters     = step.get("applied_filters", [])
         patches     = step.get("applied_patches", [])
+        computed    = step.get("computed_columns", [])
 
         df = available.get(input_name)
         if df is None:
-            # Cannot run this step — skip
+            # Cannot run this step -- skip
             continue
 
         df = df.copy()
 
-        # Apply filters
+        # Join support: merge with another table before processing
+        join_table = step.get("join_table")
+        join_key   = step.get("join_key")
+        if join_table and join_key:
+            df2 = available.get(join_table)
+            if df2 is not None:
+                df = pd.merge(df, df2, on=join_key, how="inner")
+
+        # Apply patches first (e.g. parse_currency converts "N/A" -> NaN)
+        for p in patches:
+            df = apply_patch(df, p)
+
+        # Apply filters after patches (so IS NOT NULL can catch NaN from parse_currency)
         for f in filters:
             df = apply_filter(df, f)
 
-        # Apply patches
-        for p in patches:
-            df = apply_patch(df, p)
+        # Apply computed columns (e.g. CTR = clicks / impressions)
+        if computed:
+            df = _compute_columns(df, computed)
 
         # Aggregation steps: aggregate FIRST, then select output columns
         step_id = step.get("step_id", "")
         is_agg  = step_id in ("aggregate_summary", "aggregate_monthly",
-                              "aggregate_daily", "rep_summary")
+                              "aggregate_daily", "rep_summary",
+                              "calculate_roas")
 
         if is_agg:
-            df = _do_aggregation(df, step_id)
+            df = _do_aggregation(df, step_id, available)
             # Column selection on aggregated output
             if select_cols:
                 df = df[[c for c in select_cols if c in df.columns]]
@@ -162,7 +213,9 @@ def execute_pipeline(
     return available
 
 
-def _do_aggregation(df: pd.DataFrame, step_id: str) -> pd.DataFrame:
+def _do_aggregation(
+    df: pd.DataFrame, step_id: str, available: Dict[str, pd.DataFrame]
+) -> pd.DataFrame:
     """Inline aggregation logic keyed by step_id."""
 
     if step_id == "aggregate_summary":
@@ -208,5 +261,54 @@ def _do_aggregation(df: pd.DataFrame, step_id: str) -> pd.DataFrame:
                 deal_count=("revenue_num", "count"),
             )
             return agg
+
+    elif step_id == "calculate_roas":
+        # ROAS: join clean_insights with clean_conversions on campaign_id
+        df_conversions = available.get("clean_conversions")
+        empty_roas = pd.DataFrame(columns=[
+            "campaign_id", "total_spend", "total_revenue",
+            "purchase_count", "roas",
+        ])
+
+        if df_conversions is None or "campaign_id" not in df.columns:
+            return empty_roas
+        if "campaign_id" not in df_conversions.columns:
+            return empty_roas
+
+        # SAFE MERGE: cast both sides to str so pd.merge never crashes
+        # on int64 vs object mismatch.  When the CMP_ prefix hasn't been
+        # stripped, the keys simply won't match -> 0-row result (intended bug).
+        df_ins = df.copy()
+        df_con = df_conversions.copy()
+        df_ins["_join_key"] = df_ins["campaign_id"].astype(str)
+        df_con["_join_key"] = df_con["campaign_id"].astype(str)
+
+        joined = pd.merge(df_ins, df_con, on="_join_key", how="inner",
+                          suffixes=("", "_conv"))
+
+        if joined.empty:
+            return empty_roas
+
+        joined["spend_num"] = pd.to_numeric(joined["spend"], errors="coerce")
+        joined["pv_num"]    = pd.to_numeric(joined["purchase_value"], errors="coerce")
+
+        agg = joined.groupby("_join_key", as_index=False).agg(
+            total_spend=("spend_num", "sum"),
+            total_revenue=("pv_num", "sum"),
+            purchase_count=("_join_key", "count"),
+        )
+        agg = agg.rename(columns={"_join_key": "campaign_id"})
+
+        # ROAS = revenue / spend  (guard div-by-zero)
+        agg["roas"] = agg.apply(
+            lambda r: r["total_revenue"] / r["total_spend"]
+            if r["total_spend"] and r["total_spend"] > 0 else 0.0,
+            axis=1,
+        )
+        agg["roas"] = agg["roas"].replace(
+            [float("inf"), -float("inf")], float("nan")
+        ).fillna(0)
+
+        return agg
 
     return df
