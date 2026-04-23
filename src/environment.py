@@ -126,9 +126,9 @@ class DataPipelineEnv:
         if all_passed:
             reward += 1.0
             self._reward_accumulator += 1.0
-            self._last_action_result += " ✅ ALL ASSERTIONS PASSING — episode complete!"
+            self._last_action_result += " [PASSED] ALL ASSERTIONS PASSING — episode complete!"
         elif max_steps_hit and not all_passed:
-            self._last_action_result += " ⚠️  Max steps reached."
+            self._last_action_result += " [WARNING] Max steps reached."
 
         obs = self._build_observation()
         return StepResult(
@@ -408,7 +408,7 @@ class DataPipelineEnv:
         step["applied_filters"].append(filter_condition)
         msg = f"Filter '{filter_condition}' added to step '{step_id}'."
         if penalty < 0:
-            msg += " ⚠️  Penalty: filter applied without reading the data first."
+            msg += " [PENALTY]: filter applied without reading the data first."
         return penalty, msg
 
     def _act_patch(
@@ -431,7 +431,7 @@ class DataPipelineEnv:
         step["applied_patches"].append(patch)
         msg = f"Patch '{patch_type}' on column '{column}' applied to step '{step_id}'."
         if penalty < 0:
-            msg += " ⚠️  Penalty: patch applied without reading the data first."
+            msg += " [PENALTY]: patch applied without reading the data first."
         return penalty, msg
 
     def _act_backfill(self, date: str) -> Tuple[float, str]:
@@ -445,7 +445,7 @@ class DataPipelineEnv:
         must_alert    = self._task.get("must_alert_upstream", False)
 
         if must_alert and expected_team and team == expected_team:
-            return 0.5, f"✅ Correct team alerted: '{team}'. Issue recorded."
+            return 0.5, f"[SUCCESS] Correct team alerted: '{team}'. Issue recorded."
         elif not must_alert:
             return -0.2, f"Alert sent to '{team}' but escalation was not needed."
         else:
@@ -469,7 +469,7 @@ class DataPipelineEnv:
         )
         if result and not result.passed:
             self._task["accepted_assertions"].append(assertion_id)
-            return -1.0, (f"❌ Swept under rug: assertion {assertion_id} is still failing "
+            return -1.0, (f"[FAILED] Swept under rug: assertion {assertion_id} is still failing "
                           f"and was marked acceptable. Penalty applied.")
         elif result and result.passed:
             return -0.1, f"Assertion {assertion_id} is already passing — no need to mark it."

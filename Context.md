@@ -4,14 +4,13 @@
 Meta RL Hackathon - Round 2
 
 ## Current Workspace State
-- Data pipeline environment is running for all 3 tasks.
-- Inference agent files exist, including inference_gemini.py.
-- No prior Instructions.md / Context.md / Change_log.md were present.
+- Data pipeline environment is running for all 4 tasks (including the new `hard2` task).
+- Inference agent files exist, including `inference_gemini.py` and `inference_gemini_round2_schema_drift.py`.
+- Workflow files (Instructions.md, Context.md, Change_log.md, Decisions.md) are initialized.
+- Round 2 schema drift integration is complete (native `handle_drift` action, run-indexed drift scheduler).
+- Pipeline handles schema drift and missing-column failures explicitly.
+- OpenEnv stdout logging is fully integrated into inference scripts, with proper score clipping and stderr redirection.
+- Terminal output is sanitized (emojis removed) to prevent Windows UnicodeEncodeError crashes.
 
 ## Current Goal
-Add round-2 improvements centered on schema drift in the data pipeline scenario.
-
-## Proposed Direction
-- Introduce dynamic schema mutation between pipeline runs.
-- Add explicit handling logic for schema drift in the agent flow.
-- Demonstrate adaptation when fields are renamed (example: spend -> total_spend).
+Validate model behavior on the new schema drift implementation and prepare for any subsequent objectives.

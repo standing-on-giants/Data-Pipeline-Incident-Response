@@ -40,11 +40,39 @@ API_BASE_URL   = "https://generativelanguage.googleapis.com/v1beta/openai/"
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or "MISSING_KEY"
 MODEL_NAME     = os.getenv("MODEL_NAME") or "gemini-2.5-flash"
 
+BENCHMARK      = "data_pipeline"
 MAX_STEPS      = int(os.getenv("MAX_STEPS", "30"))
 TEMPERATURE    = float(os.getenv("TEMPERATURE", "0.1"))
 MAX_TOKENS     = int(os.getenv("MAX_TOKENS", "1024"))
 
+SUCCESS_SCORE_THRESHOLD = 0.1   # score in [0, 1] to count as success
+
 FALLBACK_ACTION = PipelineAction(action_type="compare_schema", params={"table": "insights_ads"})
+
+# ------------------------------------------------------------------ #
+# OpenEnv stdout logging (spec-required — do not modify format)
+# ------------------------------------------------------------------ #
+
+def log_start(task: str, env: str, model: str) -> None:
+    print(f"[START] task={task} env={env} model={model}", flush=True)
+
+def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str]) -> None:
+    error_val   = error if error else "null"
+    done_val    = str(done).lower()
+    action_safe = action.replace("\n", " ").replace("\r", "")[:200]
+    print(
+        f"[STEP] step={step} action={action_safe} reward={reward:.2f} "
+        f"done={done_val} error={error_val}",
+        flush=True,
+    )
+
+def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
+    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
+    print(
+        f"[END] success={str(success).lower()} steps={steps} "
+        f"score={score:.2f} rewards={rewards_str}",
+        flush=True,
+    )
 
 # ------------------------------------------------------------------ #
 # System prompt
@@ -195,7 +223,7 @@ def build_user_prompt(obs: PipelineObservation, step: int) -> str:
     hint_str = ""
     if read_actions >= 2 and fix_actions == 0:
         hint_str = (
-            "\n⚠️  HINT: You have already read the data. "
+            "\n[HINT]: You have already read the data. "
             "Stop diagnosing. Apply a fix now using add_data_filter or patch_transformation, "
             "then call run_pipeline."
         )
@@ -206,7 +234,7 @@ def build_user_prompt(obs: PipelineObservation, step: int) -> str:
     )
     if parse_done and not coalesce_done and value_range_failing:
         hint_str += (
-            "\n🚨 CRITICAL: A value_range assertion is STILL failing because parse_currency converts "
+            "\n[CRITICAL]: A value_range assertion is STILL failing because parse_currency converts "
             "unparseable values (like 'N/A') to NaN, and NaN counts as out-of-range. "
             "You MUST apply a coalesce patch to replace NaN with 0 on the same column and step "
             "where you applied parse_currency."
@@ -214,7 +242,7 @@ def build_user_prompt(obs: PipelineObservation, step: int) -> str:
     # Detect mark_acceptable abuse
     if mark_actions >= 1:
         hint_str += (
-            "\n🛑 WARNING: NEVER use mark_acceptable again. It gives a -1.0 penalty every time. "
+            "\n[WARNING]: NEVER use mark_acceptable again. It gives a -1.0 penalty every time. "
             "Instead, apply a coalesce patch to fix NaN values, then run_pipeline."
         )
     # Detect run_pipeline loops
@@ -222,7 +250,7 @@ def build_user_prompt(obs: PipelineObservation, step: int) -> str:
     recent_runs = sum(1 for a in recent if "run_pipeline" in a)
     if recent_runs >= 2 and not obs.pipeline_passed:
         hint_str += (
-            "\n🚨 CRITICAL: You have called run_pipeline multiple times with no progress. "
+            "\n[CRITICAL]: You have called run_pipeline multiple times with no progress. "
             "You MUST apply a fix (patch_transformation or add_data_filter) before calling run_pipeline again."
         )
 
@@ -410,97 +438,133 @@ def run_episode(
     verbose: bool = True,
 ) -> Dict[str, Any]:
     env = DataPipelineEnv(task_id=task_id)
-    obs = env.reset()
+    
+    history:     List[Dict[str, str]] = []
+    rewards:     List[float]          = []
+    steps_taken: int                  = 0
+    score:       float                = 0.0
+    success:     bool                 = False
+    n_passed:    int                  = 0
+    n_total:     int                  = 0
+    pipeline_passed: bool             = False
 
-    conversation_history: List[Dict[str, str]] = []
-    total_reward: float = 0.0
-    steps_taken: int    = 0
+    log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
 
-    if verbose:
-        print(f"\n{'='*60}")
-        print(f"TASK: {task_id.upper()}")
-        print(f"{'='*60}")
-        print(f"Description: {obs.description}")
-        n_fail = len(obs.failed_assertions)
-        print(f"Initial failing assertions: {n_fail}")
+    try:
+        obs = env.reset()
 
-    for step in range(1, max_steps + 1):
-        if obs.pipeline_passed:
-            if verbose:
-                print(f"\n✅ Pipeline passed at step {step - 1}!")
-            break
+        if verbose:
+            print(f"\n{'='*60}", file=sys.stderr)
+            print(f"TASK: {task_id.upper()}", file=sys.stderr)
+            print(f"{'='*60}", file=sys.stderr)
+            print(f"Description: {obs.description}", file=sys.stderr)
+            n_fail = len(obs.failed_assertions)
+            print(f"Initial failing assertions: {n_fail}", file=sys.stderr)
 
-        user_prompt = build_user_prompt(obs, step)
-        conversation_history.append({"role": "user", "content": user_prompt})
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-        ] + conversation_history
+        for step in range(1, max_steps + 1):
+            if obs.pipeline_passed:
+                if verbose:
+                    print(f"\n[PASSED] Pipeline passed at step {step - 1}!", file=sys.stderr)
+                break
 
-        try:
-            completion = client.chat.completions.create(
-                model=MODEL_NAME,
-                messages=messages,
-                temperature=TEMPERATURE,
-                max_tokens=MAX_TOKENS,
-                stream=False,
-            )
-            response_text = completion.choices[0].message.content or ""
-        except Exception as exc:
-            if verbose:
-                print(f"  [Step {step}] API error: {exc}. Using fallback.")
-            response_text = ""
+            user_prompt = build_user_prompt(obs, step)
+            history.append({"role": "user", "content": user_prompt})
+            messages = [
+                {"role": "system", "content": SYSTEM_PROMPT},
+            ] + history
 
-        action = parse_llm_response(response_text)
-
-        # Smart fallback: if model returned empty/garbage and action is run_pipeline,
-        # convert the wasted step into a diagnostic compare_schema instead
-        if action.action_type == "run_pipeline" and not response_text.strip():
-            if obs.failed_assertions:
-                target_table = obs.failed_assertions[0].table
-                action = PipelineAction(
-                    action_type="compare_schema",
-                    params={"table": target_table}
+            try:
+                completion = client.chat.completions.create(
+                    model=MODEL_NAME,
+                    messages=messages,
+                    temperature=TEMPERATURE,
+                    max_tokens=MAX_TOKENS,
+                    stream=False,
                 )
-        
-        conversation_history.append({"role": "assistant", "content": response_text or "{}"})
-        # Keep history bounded to last 20 messages to avoid token limit
-        if len(conversation_history) > 20:
-            conversation_history = conversation_history[-20:]
+                response_text = completion.choices[0].message.content or ""
+            except Exception as exc:
+                if verbose:
+                    print(f"  [Step {step}] API error: {exc}. Using fallback.", file=sys.stderr, flush=True)
+                response_text = ""
+
+            action = parse_llm_response(response_text)
+
+            # Smart fallback: if model returned empty/garbage and action is run_pipeline,
+            # convert the wasted step into a diagnostic compare_schema instead
+            if action.action_type == "run_pipeline" and not response_text.strip():
+                if obs.failed_assertions:
+                    target_table = obs.failed_assertions[0].table
+                    action = PipelineAction(
+                        action_type="compare_schema",
+                        params={"table": target_table}
+                    )
+            
+            history.append({"role": "assistant", "content": response_text or "{}"})
+            # Keep history bounded to last 20 messages to avoid token limit
+            if len(history) > 20:
+                history = history[-20:]
+
+            result = env.step(action)
+            obs    = result.observation
+            reward = result.reward or 0.0
+            done   = result.done
+            error: Optional[str] = getattr(obs, "last_action_error", None) or None
+
+            rewards.append(reward)
+            steps_taken = step
+
+            log_step(
+                step=step,
+                action=json.dumps(action.model_dump()).replace("\n", " ")[:200],
+                reward=reward,
+                done=done,
+                error=error,
+            )
+
+            if verbose:
+                print(f"\n[Step {step}] Raw response: {response_text[:120]}", file=sys.stderr)
+                print(f"[Step {step}] Action: {action.action_type}({action.params})", file=sys.stderr)
+                print(f"  Reward: {reward:+.2f} | "
+                      f"Passed: {len(obs.passed_assertions)}/{len(obs.failed_assertions)+len(obs.passed_assertions)} | "
+                      f"Result: {obs.last_action_result[:80]}", file=sys.stderr)
+
+            if done:
+                break
+
+        # Final score: fraction of assertions passing
+        n_total  = len(obs.failed_assertions) + len(obs.passed_assertions)
+        n_passed = len(obs.passed_assertions)
+        pipeline_passed = obs.pipeline_passed
+        raw_score = n_passed / n_total if n_total > 0 else 0.0
+        score = min(max(raw_score, 0.01), 0.99)
+        success = score >= SUCCESS_SCORE_THRESHOLD
 
         if verbose:
-            print(f"\n[Step {step}] Raw response: {response_text[:120]}")
-            print(f"[Step {step}] Action: {action.action_type}({action.params})")
+            print(f"\n--- Episode Summary ---", file=sys.stderr)
+            print(f"  Score (assertion pass rate): {score:.2f}", file=sys.stderr)
+            print(f"  Total reward:                {sum(rewards):.2f}", file=sys.stderr)
+            print(f"  Steps taken:                 {steps_taken}", file=sys.stderr)
+            print(f"  Pipeline passed:             {pipeline_passed}", file=sys.stderr)
 
-        result = env.step(action)
-        obs    = result.observation
-        total_reward += result.reward
-        steps_taken   = step
+    except Exception as exc:
+        print(f"[DEBUG] Episode error task={task_id}: {exc}", file=sys.stderr, flush=True)
 
-        if verbose:
-            print(f"  Reward: {result.reward:+.2f} | "
-                  f"Passed: {len(obs.passed_assertions)}/{len(obs.failed_assertions)+len(obs.passed_assertions)} | "
-                  f"Result: {obs.last_action_result[:80]}")
+    finally:
+        try:
+            env.close()
+        except AttributeError:
+            pass
+        except Exception as e:
+            print(f"[DEBUG] env.close() error: {e}", file=sys.stderr, flush=True)
 
-        if result.done:
-            break
-
-    # Final score: fraction of assertions passing
-    n_total  = len(obs.failed_assertions) + len(obs.passed_assertions)
-    n_passed = len(obs.passed_assertions)
-    score    = n_passed / n_total if n_total > 0 else 0.0
-
-    if verbose:
-        print(f"\n--- Episode Summary ---")
-        print(f"  Score (assertion pass rate): {score:.2f}")
-        print(f"  Total reward:                {total_reward:.2f}")
-        print(f"  Steps taken:                 {steps_taken}")
-        print(f"  Pipeline passed:             {obs.pipeline_passed}")
+        log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
 
     return {
         "task_id":        task_id,
         "score":          round(score, 4),
-        "pipeline_passed": obs.pipeline_passed,
-        "total_reward":   round(total_reward, 4),
+        "success":        success,
+        "pipeline_passed": pipeline_passed,
+        "total_reward":   round(sum(rewards), 4),
         "steps_taken":    steps_taken,
         "assertions_passed": n_passed,
         "assertions_total":  n_total,
@@ -541,21 +605,33 @@ def main():
         )
         all_results.append(result)
 
-    print("\n" + "="*60)
-    print("FINAL SCORES")
-    print("="*60)
+    print("\n" + "="*60, file=sys.stderr)
+    print("FINAL SCORES", file=sys.stderr)
+    print("="*60, file=sys.stderr)
     total_score = 0.0
     for r in all_results:
-        status = "✅ PASSED" if r["pipeline_passed"] else "❌ FAILED"
+        status = "[PASSED]" if r["pipeline_passed"] else "[FAILED]"
         print(f"  {r['task_id']:8s} | score={r['score']:.2f} | "
-              f"reward={r['total_reward']:+.2f} | steps={r['steps_taken']:2d} | {status}")
+              f"reward={r['total_reward']:+.2f} | steps={r['steps_taken']:2d} | {status}", file=sys.stderr)
         total_score += r["score"]
 
     avg = total_score / len(all_results) if all_results else 0.0
-    print(f"\n  Average score: {avg:.4f}")
+    print(f"\n  Average score: {avg:.4f}", file=sys.stderr)
 
-    # Machine-readable output for automated scoring
-    print("\nJSON_RESULTS:", json.dumps(all_results, indent=2))
+    # Summary to stderr — keeps stdout clean for the spec parser
+    import re
+    json_str = json.dumps(all_results, indent=2)
+    json_str = re.sub(
+        r'"total_reward":\s*(-?\d+(?:\.\d+)?)',
+        lambda m: f'"total_reward": {float(m.group(1)):.2f}',
+        json_str,
+    )
+    json_str = re.sub(
+        r'"score":\s*(-?\d+(?:\.\d+)?)',
+        lambda m: f'"score": {float(m.group(1)):.2f}',
+        json_str,
+    )
+    print("\nJSON_RESULTS:", json_str, file=sys.stderr)
 
 
 if __name__ == "__main__":

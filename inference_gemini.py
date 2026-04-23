@@ -174,7 +174,7 @@ def build_user_prompt(obs: PipelineObservation, step: int) -> str:
     hint_str = ""
     if read_actions >= 2 and fix_actions == 0:
         hint_str = (
-            "\n⚠️  HINT: You have already read the data. "
+            "\n[HINT]: You have already read the data. "
             "Stop diagnosing. Apply a fix now using add_data_filter or patch_transformation, "
             "then call run_pipeline."
         )
@@ -185,7 +185,7 @@ def build_user_prompt(obs: PipelineObservation, step: int) -> str:
     )
     if parse_done and not coalesce_done and value_range_failing:
         hint_str += (
-            "\n🚨 CRITICAL: A value_range assertion is STILL failing because parse_currency converts "
+            "\n[CRITICAL]: A value_range assertion is STILL failing because parse_currency converts "
             "unparseable values (like 'N/A') to NaN, and NaN counts as out-of-range. "
             "You MUST apply a coalesce patch to replace NaN with 0 on the same column and step "
             "where you applied parse_currency."
@@ -193,7 +193,7 @@ def build_user_prompt(obs: PipelineObservation, step: int) -> str:
     # Detect mark_acceptable abuse
     if mark_actions >= 1:
         hint_str += (
-            "\n🛑 WARNING: NEVER use mark_acceptable again. It gives a -1.0 penalty every time. "
+            "\n[WARNING]: NEVER use mark_acceptable again. It gives a -1.0 penalty every time. "
             "Instead, apply a coalesce patch to fix NaN values, then run_pipeline."
         )
     # Detect run_pipeline loops
@@ -201,7 +201,7 @@ def build_user_prompt(obs: PipelineObservation, step: int) -> str:
     recent_runs = sum(1 for a in recent if "run_pipeline" in a)
     if recent_runs >= 2 and not obs.pipeline_passed:
         hint_str += (
-            "\n🚨 CRITICAL: You have called run_pipeline multiple times with no progress. "
+            "\n[CRITICAL]: You have called run_pipeline multiple times with no progress. "
             "You MUST apply a fix (patch_transformation or add_data_filter) before calling run_pipeline again."
         )
 
@@ -360,7 +360,7 @@ def run_episode(
     for step in range(1, max_steps + 1):
         if obs.pipeline_passed:
             if verbose:
-                print(f"\n✅ Pipeline passed at step {step - 1}!")
+                print(f"\n[PASSED] Pipeline passed at step {step - 1}!")
             break
 
         user_prompt = build_user_prompt(obs, step)
@@ -479,7 +479,7 @@ def main():
     print("="*60)
     total_score = 0.0
     for r in all_results:
-        status = "✅ PASSED" if r["pipeline_passed"] else "❌ FAILED"
+        status = "[PASSED]" if r["pipeline_passed"] else "[FAILED]"
         print(f"  {r['task_id']:8s} | score={r['score']:.2f} | "
               f"reward={r['total_reward']:+.2f} | steps={r['steps_taken']:2d} | {status}")
         total_score += r["score"]

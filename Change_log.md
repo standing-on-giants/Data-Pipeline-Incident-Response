@@ -40,3 +40,11 @@
     - run2 applied drift event raw_ads_insights.spend -> total_spend.
     - handle_drift(resolve_column_rename) restored compatibility.
     - subsequent run applied next drift event (auth format rotation).
+- Performed workflow file audit. Updated: Context.md, Change_log.md. No code was modified.
+- Verified workflow file claims against actual source code files (`inference_gemini_round2_schema_drift.py`, `src/environment.py`, etc.). Confirmed that the documentation accurately reflects the codebase implementation.
+- Implemented OpenEnv stdout logging specification across all inference scripts (`inference.py`, `inference_gemini.py`, `inference_gemini_round2_schema_drift.py`).
+  - Added `log_start`, `log_step`, and `log_end` functions.
+  - Redirected all verbose logs, conversational output, and the JSON results summary to `sys.stderr`.
+  - Applied score clipping logic `min(max(raw_score, 0.01), 0.99)` for OpenEnv spec compliance.
+- Fixed Windows terminal `UnicodeEncodeError` by removing all emojis from inference scripts and `src/environment.py`. Replaced them with text markers (e.g. `[PASSED]`, `[WARNING]`).
+- Verified execution and final score logic (hard2 achieving 0.88 with max_steps reached).
