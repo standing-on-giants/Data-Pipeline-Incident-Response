@@ -21,3 +21,22 @@
 - Verified completion status on user request:
   - Round 2 schema-drift inference variant exists and compiles.
   - Existing task definitions in src/tasks.py were reviewed and not modified in this iteration.
+- Started full completion pass:
+  - Add new hard2 task (keep existing hard unchanged).
+  - Add native handle_drift action support in environment/model.
+  - Add drift mutation schedule between run_pipeline calls.
+- Completed full Round 2 integration pass:
+  - Added native `handle_drift` action to src/models.py.
+  - Added `handle_drift` dispatcher + strategy handlers in src/environment.py.
+  - Added run-indexed drift scheduler in src/environment.py (_apply_scheduled_drift), triggered during run_pipeline.
+  - Added new hard2 task in src/tasks.py while keeping existing hard task unchanged.
+  - Added hard2 drift schedule events (column rename, auth format rotation, rate limit tightening).
+  - Updated task registries/CLI choices in inference.py, inference_gemini.py, and inference_gemini_round2_schema_drift.py.
+  - Updated assertion behavior to report missing-column failures explicitly (src/assertions.py).
+  - Updated pipeline aggregation to tolerate spend/total_spend input in joins (src/pipeline_runner.py).
+- Validation completed in Basic_Computer_vision conda environment:
+  - py_compile succeeded for all modified Python files.
+  - hard2 smoke test succeeded:
+    - run2 applied drift event raw_ads_insights.spend -> total_spend.
+    - handle_drift(resolve_column_rename) restored compatibility.
+    - subsequent run applied next drift event (auth format rotation).

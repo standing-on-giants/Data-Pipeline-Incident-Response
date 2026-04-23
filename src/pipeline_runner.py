@@ -289,7 +289,13 @@ def _do_aggregation(
         if joined.empty:
             return empty_roas
 
-        joined["spend_num"] = pd.to_numeric(joined["spend"], errors="coerce")
+        spend_col = "spend" if "spend" in joined.columns else (
+            "total_spend" if "total_spend" in joined.columns else None
+        )
+        if spend_col is None or "purchase_value" not in joined.columns:
+            return empty_roas
+
+        joined["spend_num"] = pd.to_numeric(joined[spend_col], errors="coerce")
         joined["pv_num"]    = pd.to_numeric(joined["purchase_value"], errors="coerce")
 
         agg = joined.groupby("_join_key", as_index=False).agg(

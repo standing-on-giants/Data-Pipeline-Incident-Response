@@ -79,6 +79,7 @@ class PipelineAction(BaseModel):
         "read_data_sample",       # look at rows in a table
         "check_schema",           # inspect current column types
         "compare_schema",         # diff current vs historical schema
+        "handle_drift",           # dedicated schema/contract drift handling action
         "run_quality_assertion",  # re-run a specific assertion on demand
         "add_data_filter",        # add a WHERE-style filter to a pipeline step
         "patch_transformation",   # apply a column-level fix (cast, coalesce, dedup)

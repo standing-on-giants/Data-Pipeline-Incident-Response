@@ -29,6 +29,16 @@ def check_assertion(
             passed=False, failing_row_count=0,
         )
 
+    if col is not None and col not in df.columns:
+        return AssertionResult(
+            assertion_id=a_id, table=table, assertion_type=a_type,
+            column=col,
+            expected=f"column '{col}' exists",
+            actual=f"column '{col}' not found",
+            passed=False,
+            failing_row_count=len(df),
+        )
+
     # ------------------------------------------------------------------
     # NOT NULL
     # ------------------------------------------------------------------

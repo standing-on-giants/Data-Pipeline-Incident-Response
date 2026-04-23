@@ -347,7 +347,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Data Pipeline Incident Response — baseline inference"
     )
-    parser.add_argument("--task", choices=["easy", "medium", "hard", "all"],
+    parser.add_argument("--task", choices=["easy", "medium", "hard", "hard2", "all"],
                         default="all", help="Which task to run (default: all)")
     parser.add_argument("--steps", type=int, default=MAX_STEPS,
                         help="Max steps per episode")
@@ -358,7 +358,7 @@ def main():
     client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
     # client = OpenAI(api_key=API_KEY)
 
-    tasks = ["easy", "medium", "hard"] if args.task == "all" else [args.task]
+    tasks = ["easy", "medium", "hard", "hard2"] if args.task == "all" else [args.task]
 
     all_results = []
     for task_id in tasks:

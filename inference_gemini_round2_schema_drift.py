@@ -73,7 +73,7 @@ AVAILABLE ACTIONS (respond with ONLY a JSON object, no markdown, no prose):
 {"action_type": "read_data_sample", "params": {"table": "<table_name>", "n_rows": 20}}
 {"action_type": "check_schema", "params": {"table": "<table_name>"}}
 {"action_type": "compare_schema", "params": {"table": "<table_name>"}}
-{"action_type": "handle_drift", "params": {"strategy": "<detect|numeric_format|null_fill|type_cast|join_key_prefix|filter_invalid|alert_upstream>", "table": "<table_name_optional>", "step_id": "<step_id_optional>", "column": "<column_optional>", "filter_condition": "<optional>", "team": "<optional>", "issue_description": "<optional>"}}
+{"action_type": "handle_drift", "params": {"strategy": "<detect|numeric_format|null_fill|type_cast|join_key_prefix|filter_invalid|resolve_column_rename|alert_upstream>", "table": "<table_name_optional>", "step_id": "<step_id_optional>", "column": "<column_optional>", "old_column": "<optional_old_name>", "new_column": "<optional_new_name>", "filter_condition": "<optional>", "team": "<optional>", "issue_description": "<optional>"}}
 {"action_type": "run_quality_assertion", "params": {"assertion_id": "<e.g. A1>"}}
 {"action_type": "add_data_filter", "params": {"step_id": "<step_id>", "filter_condition": "<e.g. user_id IS NOT NULL>"}}
 {"action_type": "patch_transformation", "params": {"step_id": "<step_id>", "patch_type": "<cast_column|coalesce|dedup|parse_currency|strip_prefix>", "column": "<column_name>"}}
@@ -106,6 +106,7 @@ DRIFT HANDLING RULES:
     type_cast -> patch_transformation(cast_column)
     join_key_prefix -> patch_transformation(strip_prefix)
     filter_invalid -> add_data_filter
+    resolve_column_rename -> restore compatibility for renamed columns (e.g. spend <- total_spend)
     alert_upstream -> alert_upstream_team
 - For spend -> total_spend style drift, compare schema first, then patch transformations to align types.
 
@@ -332,7 +333,7 @@ def _extract_action_payload(text: str) -> Optional[dict]:
 
 
 def _normalize_action_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Map Round 2 virtual action `handle_drift` to concrete environment-supported actions."""
+    """Normalize action payload while preserving native handle_drift support."""
     action_type = str(payload.get("action_type", "")).strip()
     params = payload.get("params") or {}
     if not isinstance(params, dict):
@@ -341,49 +342,7 @@ def _normalize_action_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     if action_type != "handle_drift":
         return {"action_type": action_type, "params": params}
 
-    strategy = str(params.get("strategy", "detect")).strip().lower()
-    table = params.get("table") or "insights_ads"
-    step_id = params.get("step_id") or "transform_ads"
-    column = params.get("column") or "spend"
-
-    if strategy == "detect":
-        return {"action_type": "compare_schema", "params": {"table": table}}
-    if strategy == "numeric_format":
-        return {
-            "action_type": "patch_transformation",
-            "params": {"step_id": step_id, "patch_type": "parse_currency", "column": column},
-        }
-    if strategy == "null_fill":
-        return {
-            "action_type": "patch_transformation",
-            "params": {"step_id": step_id, "patch_type": "coalesce", "column": column},
-        }
-    if strategy == "type_cast":
-        return {
-            "action_type": "patch_transformation",
-            "params": {"step_id": step_id, "patch_type": "cast_column", "column": column},
-        }
-    if strategy == "join_key_prefix":
-        return {
-            "action_type": "patch_transformation",
-            "params": {"step_id": step_id, "patch_type": "strip_prefix", "column": column},
-        }
-    if strategy == "filter_invalid":
-        filter_condition = params.get("filter_condition") or f"{column} IS NOT NULL"
-        return {
-            "action_type": "add_data_filter",
-            "params": {"step_id": step_id, "filter_condition": filter_condition},
-        }
-    if strategy == "alert_upstream":
-        team = params.get("team") or "meta_ads_api_team"
-        issue_description = params.get("issue_description") or "Detected schema drift across pipeline runs"
-        return {
-            "action_type": "alert_upstream_team",
-            "params": {"team": team, "issue_description": issue_description},
-        }
-
-    # Unknown strategy defaults to detection for safe exploration.
-    return {"action_type": "compare_schema", "params": {"table": table}}
+    return {"action_type": "handle_drift", "params": params}
 
 
 def _try_repair_json(fragment: str) -> Optional[dict]:
@@ -556,7 +515,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Data Pipeline Incident Response — Gemini 2.5 Flash via OpenAI API Compat"
     )
-    parser.add_argument("--task", choices=["easy", "medium", "hard", "all"],
+    parser.add_argument("--task", choices=["easy", "medium", "hard", "hard2", "all"],
                         default="all", help="Which task to run (default: all)")
     parser.add_argument("--steps", type=int, default=MAX_STEPS,
                         help="Max steps per episode")
@@ -570,7 +529,7 @@ def main():
         api_key=GEMINI_API_KEY
     )
 
-    tasks = ["easy", "medium", "hard"] if args.task == "all" else [args.task]
+    tasks = ["easy", "medium", "hard", "hard2"] if args.task == "all" else [args.task]
 
     all_results = []
     for task_id in tasks:

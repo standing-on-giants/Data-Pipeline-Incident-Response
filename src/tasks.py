@@ -10,6 +10,7 @@ Each task returns a dict that fully specifies:
   - Gold-standard fix info (used by grader, never shown to agent)
 """
 from __future__ import annotations
+import copy
 from typing import Any, Dict
 import numpy as np
 import pandas as pd
@@ -483,6 +484,91 @@ def make_hard_task() -> Dict[str, Any]:
     }
 
 
+def make_hard2_task() -> Dict[str, Any]:
+    """Round 2 variant of hard task with dynamic schema/contract drift between runs."""
+    task = copy.deepcopy(make_hard_task())
+
+    task["task_id"] = "hard2"
+    task["difficulty"] = "hard"
+    task["description"] = (
+        "Round 2 incident: your Meta Ads ROAS pipeline has dynamic schema drift between runs. "
+        "After initial fixes, upstream APIs may mutate payload contracts (column renames, auth format "
+        "changes, and tighter rate limits). Detect drift during debugging, adapt safely, and keep "
+        "assertions passing."
+    )
+
+    task["drift_schedule"] = [
+        {
+            "id": "drift_rename_spend",
+            "run_index": 2,
+            "type": "rename_column",
+            "table": "raw_ads_insights",
+            "from": "spend",
+            "to": "total_spend",
+            "reason": "Graph API contract update renamed spend field",
+        },
+        {
+            "id": "drift_auth_rotation",
+            "run_index": 3,
+            "type": "auth_format",
+            "format": "Bearer-v2",
+            "reason": "Auth token format rotated by upstream API",
+        },
+        {
+            "id": "drift_rate_limit",
+            "run_index": 4,
+            "type": "rate_limit",
+            "max_calls": 1,
+            "reason": "Rate limit tightened during incident window",
+        },
+    ]
+
+    task["gold_root_cause"] = (
+        "dynamic_schema_drift_rename_plus_contract_rotation"
+    )
+    task["gold_fix_actions"] = [
+        {"action_type": "handle_drift",
+         "params": {"strategy": "detect", "table": "raw_ads_insights"}},
+        {"action_type": "handle_drift",
+         "params": {"strategy": "resolve_column_rename",
+                    "table": "raw_ads_insights",
+                    "old_column": "spend",
+                    "new_column": "total_spend"}},
+        {"action_type": "patch_transformation",
+         "params": {"step_id": "transform_insights",
+                    "patch_type": "parse_currency",
+                    "column": "spend"}},
+        {"action_type": "patch_transformation",
+         "params": {"step_id": "transform_insights",
+                    "patch_type": "coalesce",
+                    "column": "spend"}},
+        {"action_type": "patch_transformation",
+         "params": {"step_id": "transform_insights",
+                    "patch_type": "parse_currency",
+                    "column": "impressions"}},
+        {"action_type": "add_data_filter",
+         "params": {"step_id": "transform_insights",
+                    "filter_condition": "impressions IS NOT NULL"}},
+        {"action_type": "patch_transformation",
+         "params": {"step_id": "transform_conversions",
+                    "patch_type": "dedup",
+                    "column": "event_id"}},
+        {"action_type": "patch_transformation",
+         "params": {"step_id": "transform_conversions",
+                    "patch_type": "strip_prefix",
+                    "column": "campaign_id"}},
+        {"action_type": "patch_transformation",
+         "params": {"step_id": "transform_conversions",
+                    "patch_type": "cast_column",
+                    "column": "campaign_id"}},
+        {"action_type": "alert_upstream_team",
+         "params": {"team": "meta_ads_api_team",
+                    "issue_description": "Dynamic schema drift observed during run window"}},
+    ]
+
+    return task
+
+
 # ============================================================
 # Registry
 # ============================================================
@@ -491,6 +577,7 @@ TASKS: Dict[str, Any] = {
     "easy":   make_easy_task,
     "medium": make_medium_task,
     "hard":   make_hard_task,
+    "hard2":  make_hard2_task,
 }
 
 

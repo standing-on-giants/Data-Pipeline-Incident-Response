@@ -59,6 +59,8 @@ class DataPipelineEnv:
         self._last_hist_schema: Optional[Dict[str, str]] = None
         self._last_schema_diff: Optional[Dict[str, str]] = None
         self._last_action_result: str = ""
+        self._pipeline_run_count: int = 0
+        self._applied_drift_events: Set[str] = set()
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -82,6 +84,8 @@ class DataPipelineEnv:
         self._last_hist_schema   = None
         self._last_schema_diff   = None
         self._last_action_result = "Pipeline reset. Initial assertion results loaded."
+        self._pipeline_run_count = 0
+        self._applied_drift_events = set()
         self._task["accepted_assertions"] = []
         self._task["alerts_sent"]         = []
 
@@ -164,6 +168,19 @@ class DataPipelineEnv:
 
         elif action.action_type == "compare_schema":
             return self._act_compare_schema(table=p.get("table", ""))
+
+        elif action.action_type == "handle_drift":
+            return self._act_handle_drift(
+                strategy=p.get("strategy", "detect"),
+                table=p.get("table", ""),
+                step_id=p.get("step_id", ""),
+                column=p.get("column", ""),
+                filter_condition=p.get("filter_condition", ""),
+                team=p.get("team", "meta_ads_api_team"),
+                issue=p.get("issue_description", ""),
+                old_column=p.get("old_column", "spend"),
+                new_column=p.get("new_column", "total_spend"),
+            )
 
         elif action.action_type == "run_quality_assertion":
             return self._act_run_assertion(assertion_id=p.get("assertion_id", ""))
@@ -284,6 +301,98 @@ class DataPipelineEnv:
         return 0.0, (f"Assertion {assertion_id} re-run: {status}. "
                      f"{result.actual}")
 
+    def _act_handle_drift(
+        self,
+        strategy: str,
+        table: str,
+        step_id: str,
+        column: str,
+        filter_condition: str,
+        team: str,
+        issue: str,
+        old_column: str,
+        new_column: str,
+    ) -> Tuple[float, str]:
+        s = (strategy or "detect").strip().lower()
+
+        if s == "detect":
+            target_table = table or "raw_ads_insights"
+            return self._act_compare_schema(target_table)
+
+        if s == "numeric_format":
+            return self._act_patch(
+                step_id=step_id or "transform_insights",
+                patch_type="parse_currency",
+                column=column or "spend",
+                extra={},
+            )
+
+        if s == "null_fill":
+            return self._act_patch(
+                step_id=step_id or "transform_insights",
+                patch_type="coalesce",
+                column=column or "spend",
+                extra={},
+            )
+
+        if s == "type_cast":
+            return self._act_patch(
+                step_id=step_id or "transform_conversions",
+                patch_type="cast_column",
+                column=column or "campaign_id",
+                extra={},
+            )
+
+        if s == "join_key_prefix":
+            return self._act_patch(
+                step_id=step_id or "transform_conversions",
+                patch_type="strip_prefix",
+                column=column or "campaign_id",
+                extra={},
+            )
+
+        if s == "filter_invalid":
+            return self._act_add_filter(
+                step_id=step_id or "transform_insights",
+                filter_condition=filter_condition or f"{(column or 'impressions')} IS NOT NULL",
+            )
+
+        if s == "alert_upstream":
+            return self._act_alert(
+                team=team or "meta_ads_api_team",
+                issue=issue or "Schema drift detected in upstream API payload",
+            )
+
+        if s in ("resolve_column_rename", "column_rename"):
+            target_table = table or "raw_ads_insights"
+            src_col = old_column or "spend"
+            dst_col = new_column or "total_spend"
+            df = self._raw_tables.get(target_table)
+            if df is None:
+                return -0.1, f"Table '{target_table}' not found for drift resolution."
+            if src_col in df.columns:
+                return 0.0, f"Column '{src_col}' already present in '{target_table}'."
+            if dst_col not in df.columns:
+                return -0.1, (
+                    f"Cannot resolve rename drift: '{dst_col}' missing in '{target_table}'."
+                )
+
+            # Compatibility shim for renamed upstream columns.
+            df[src_col] = df[dst_col]
+            self._raw_tables[target_table] = df
+
+            schemas = self._task.get("schemas", {})
+            cur_schema = schemas.get(target_table, {}).get("current")
+            if isinstance(cur_schema, dict) and dst_col in cur_schema and src_col not in cur_schema:
+                cur_schema[src_col] = cur_schema[dst_col]
+
+            return 0.2, (
+                f"Resolved schema rename drift in '{target_table}': mirrored "
+                f"'{dst_col}' to '{src_col}'."
+            )
+
+        return -0.1, f"Unknown handle_drift strategy '{strategy}'."
+
     def _act_add_filter(
         self, step_id: str, filter_condition: str
     ) -> Tuple[float, str]:
@@ -367,6 +476,9 @@ class DataPipelineEnv:
         return -0.1, f"Could not evaluate assertion {assertion_id}."
 
     def _act_run_pipeline(self) -> Tuple[float, str]:
+        self._pipeline_run_count += 1
+        drift_messages = self._apply_scheduled_drift(self._pipeline_run_count)
+
         # Re-execute pipeline with current dag state
         self._all_tables = execute_pipeline(self._raw_tables, self._dag)
         new_results      = self._run_all_assertions()
@@ -386,7 +498,63 @@ class DataPipelineEnv:
         n_tot  = len(new_results)
         msg = (f"Pipeline re-run: {n_pass}/{n_tot} assertions passing. "
                f"+{len(gained)} gained, -{len(lost)} lost.")
+        if drift_messages:
+            msg += " Drift events applied: " + " | ".join(drift_messages)
         return reward, msg
+
+    def _apply_scheduled_drift(self, run_index: int) -> List[str]:
+        schedule = self._task.get("drift_schedule", [])
+        if not schedule:
+            return []
+
+        messages: List[str] = []
+        for i, event in enumerate(schedule):
+            if int(event.get("run_index", -1)) != run_index:
+                continue
+
+            event_id = str(event.get("id", f"evt_{run_index}_{i}"))
+            if event_id in self._applied_drift_events:
+                continue
+
+            event_type = str(event.get("type", "")).strip().lower()
+
+            if event_type == "rename_column":
+                table = event.get("table", "")
+                old_col = event.get("from", "")
+                new_col = event.get("to", "")
+                df = self._raw_tables.get(table)
+                if df is not None and old_col in df.columns:
+                    df = df.rename(columns={old_col: new_col})
+                    self._raw_tables[table] = df
+
+                    schemas = self._task.get("schemas", {})
+                    cur_schema = schemas.get(table, {}).get("current")
+                    if isinstance(cur_schema, dict) and old_col in cur_schema:
+                        old_dtype = cur_schema.pop(old_col)
+                        cur_schema[new_col] = old_dtype
+
+                    messages.append(f"{table}.{old_col} renamed to {new_col}")
+                else:
+                    messages.append(f"rename_column skipped for {table}.{old_col}")
+
+            elif event_type == "auth_format":
+                self._task["current_auth_format"] = event.get("format", "unknown")
+                messages.append(
+                    f"auth format rotated to {self._task['current_auth_format']}"
+                )
+
+            elif event_type == "rate_limit":
+                self._task["current_rate_limit"] = int(event.get("max_calls", 1))
+                messages.append(
+                    f"rate limit tightened to {self._task['current_rate_limit']} calls/window"
+                )
+
+            else:
+                messages.append(f"unknown drift event type '{event_type}' ignored")
+
+            self._applied_drift_events.add(event_id)
+
+        return messages
 
     # ------------------------------------------------------------------ #
     # Helpers
