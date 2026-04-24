@@ -1,27 +1,40 @@
 """
-OpenEnv-compliant WebSocket server for the Data Pipeline Incident Response environment.
+OpenEnv-compliant REST and WebSocket server for the Data Pipeline Incident Response environment.
 
 Protocol:
-  Client → Server: JSON message with "action" field
-    reset:  {"action": "reset", "task_id": "easy|medium|hard"}
-    step:   {"action": {"action_type": "...", "params": {...}}}
-    state:  {"action": "state"}
+  REST Endpoint:
+    POST /reset:  {"task_id": "easy|medium|hard"}
+    POST /step:   {"action": {"action_type": "...", "params": {...}}}
+    GET /health:  healthcheck
 
-  Server → Client: JSON with observation / reward / done / info
+  WebSocket Endpoint:
+    Client → Server: JSON message with "action" field
+      reset:  {"action": "reset", "task_id": "easy|medium|hard"}
+      step:   {"action": {"action_type": "...", "params": {...}}}
+      state:  {"action": "state"}
 """
 from __future__ import annotations
 import json
 import os
-from typing import Dict
+from typing import Dict, Optional
 
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from pydantic import BaseModel
 
 from src.environment import DataPipelineEnv
 from src.models import PipelineAction
 
 app = FastAPI(title="Data Pipeline Incident Response — OpenEnv")
 
+# Global env for HTTP REST mode
+_global_env: Optional[DataPipelineEnv] = None
+
+class ResetRequest(BaseModel):
+    task_id: str = "easy"
+
+class StepRequest(BaseModel):
+    action: PipelineAction
 
 # ------------------------------------------------------------------ #
 # Health check
@@ -31,17 +44,46 @@ app = FastAPI(title="Data Pipeline Incident Response — OpenEnv")
 async def health():
     return {"status": "ok", "env": "data-pipeline-incident-response"}
 
-
 @app.get("/")
 async def root():
     return {
         "name": "Data Pipeline Incident Response",
         "version": "1.0.0",
-        "tasks": ["easy", "medium", "hard"],
+        "tasks": ["easy", "medium", "hard", "hard2"],
         "openenv_spec": "0.1",
         "websocket_endpoint": "/ws",
+        "rest_endpoints": ["/reset", "/step"]
     }
 
+# ------------------------------------------------------------------ #
+# REST endpoints
+# ------------------------------------------------------------------ #
+
+@app.post("/reset")
+async def reset_env(req: ResetRequest):
+    global _global_env
+    _global_env = DataPipelineEnv(task_id=req.task_id)
+    obs = _global_env.reset()
+    return {
+        "observation": obs.model_dump(),
+        "reward": 0.0,
+        "done": False,
+        "info": {"task_id": req.task_id},
+    }
+
+@app.post("/step")
+async def step_env(req: StepRequest):
+    global _global_env
+    if _global_env is None:
+        raise HTTPException(status_code=400, detail="Call /reset first.")
+    
+    result = _global_env.step(req.action)
+    return {
+        "observation": result.observation.model_dump(),
+        "reward": result.reward,
+        "done": result.done,
+        "info": result.info,
+    }
 
 # ------------------------------------------------------------------ #
 # WebSocket endpoint — one session per connection
@@ -117,6 +159,9 @@ async def _send_error(ws: WebSocket, msg: str):
 # Entry point
 # ------------------------------------------------------------------ #
 
-if __name__ == "__main__":
+def main():
     port = int(os.getenv("PORT", 8001))
-    uvicorn.run("src.server:app", host="0.0.0.0", port=port, workers=1)
+    uvicorn.run("server.app:app", host="0.0.0.0", port=port, workers=1)
+
+if __name__ == "__main__":
+    main()
