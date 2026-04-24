@@ -62,6 +62,10 @@ class PipelineObservation(BaseModel):
     historical_schema: Optional[Dict[str, str]] = None
     schema_diff: Optional[Dict[str, str]] = None    # new / removed / changed columns
 
+    # All table names the agent can legally reference (raw + pipeline outputs).
+    # Populated on every observation so the agent never has to guess table names.
+    available_tables: List[str] = Field(default_factory=list)
+
     last_action_result: str
     actions_taken: List[str]
     pipeline_passed: bool

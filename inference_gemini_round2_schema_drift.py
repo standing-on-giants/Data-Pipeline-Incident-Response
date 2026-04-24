@@ -41,7 +41,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or "MISSING_KEY"
 MODEL_NAME     = os.getenv("MODEL_NAME") or "gemini-2.5-flash"
 
 BENCHMARK      = "data_pipeline"
-MAX_STEPS      = int(os.getenv("MAX_STEPS", "30"))
+MAX_STEPS      = int(os.getenv("MAX_STEPS", "100"))
 TEMPERATURE    = float(os.getenv("TEMPERATURE", "0.1"))
 MAX_TOKENS     = int(os.getenv("MAX_TOKENS", "1024"))
 
