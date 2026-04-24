@@ -47,7 +47,7 @@ MAX_TOKENS     = int(os.getenv("MAX_TOKENS", "1024"))
 
 SUCCESS_SCORE_THRESHOLD = 0.1   # score in [0, 1] to count as success
 
-FALLBACK_ACTION = PipelineAction(action_type="compare_schema", params={"table": "insights_ads"})
+FALLBACK_ACTION = PipelineAction(action_type="compare_schema", params={"table": "raw_ads_insights"})
 
 # ------------------------------------------------------------------ #
 # OpenEnv stdout logging (spec-required — do not modify format)
@@ -180,7 +180,7 @@ def build_user_prompt(obs: PipelineObservation, step: int) -> str:
 
     hist_str = "\n".join(
         f"  {r.date}: {r.status} ({r.row_count} rows)"
-        for r in obs.historical_runs
+        for r in obs.historical_runs[-2:]
     )
 
     sample_str = ""
@@ -437,7 +437,7 @@ def run_episode(
     max_steps: int = MAX_STEPS,
     verbose: bool = True,
 ) -> Dict[str, Any]:
-    env = DataPipelineEnv(task_id=task_id)
+    env = DataPipelineEnv(task_id=task_id, max_steps=max_steps)
     
     history:     List[Dict[str, str]] = []
     rewards:     List[float]          = []

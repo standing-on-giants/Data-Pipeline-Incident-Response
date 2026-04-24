@@ -126,6 +126,13 @@
 - `average_tokens_across_devices=False`: Explicitly disabled to prevent Unsloth loss tensor `AttributeError: 'int' object has no attribute 'mean'` issues.
 - `report_to="none"`: Added to `TrainingArguments` to bypass implicit `wandb` API key hanging behavior in Kaggle environments.
 - `warmup_ratio=0.05` -> `warmup_steps=1` and `logging_steps=1`: Removed deprecation warnings and improved CLI verbosity during slow generation steps.
+### FIX: Environment & Inference Bug Fixes (The 6 Critical Bugs)
+- **Bug 1 (MAX_STEPS mismatch)**: `MAX_STEPS` was hardcoded to 20. Fixed by making `max_steps` an instance attribute configurable via `__init__` (e.g. 30 for `hard2`).
+- **Bug 2 (read_data_sample reward)**: The first read reward was wrongly computed as `-0.05` because the table was added to `_inspected_tables` *before* the check. Reordered logic to return `0.0`.
+- **Bug 3 (FALLBACK_ACTION wrong table name)**: Globally replaced `insights_ads` with `raw_ads_insights`.
+- **Bug 4 (Token pressure & context limit)**: Added aggressive observation trimming: `obs.historical_runs` is now capped to the last 2 entries (`[-2:]`) to prevent context overflows on hard tasks.
+- **Bug 5 (env.close() missing)**: Added a no-op `close(self)` method to `DataPipelineEnv` for full OpenEnv compliance.
+- **Bug 6 (max_steps not passed to env)**: Updated all environment instantiations globally (`DataPipelineEnv(task_id, max_steps=max_steps)`) to properly pipe the limit.
 
 ### REMAINING GAPS (still open before submission)
 - GAP-004: Mini blog or 2-minute video not yet recorded.

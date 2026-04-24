@@ -136,7 +136,7 @@ def build_user_prompt(obs: PipelineObservation, step: int) -> str:
 
     hist_str = "\n".join(
         f"  {r.date}: {r.status} ({r.row_count} rows)"
-        for r in obs.historical_runs
+        for r in obs.historical_runs[-2:]
     )
 
     sample_str = ""
@@ -342,7 +342,7 @@ def run_episode(
     max_steps: int = MAX_STEPS,
     verbose: bool = True,
 ) -> Dict[str, Any]:
-    env = DataPipelineEnv(task_id=task_id)
+    env = DataPipelineEnv(task_id=task_id, max_steps=max_steps)
     obs = env.reset()
 
     conversation_history: List[Dict[str, str]] = []

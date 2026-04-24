@@ -33,10 +33,9 @@ class DataPipelineEnv:
       5. done when all assertions pass OR max_steps reached
     """
 
-    MAX_STEPS = 20
-
-    def __init__(self, task_id: str = "easy") -> None:
+    def __init__(self, task_id: str = "easy", max_steps: int = 20) -> None:
         self.task_id = task_id
+        self.max_steps = max_steps
         self._task: Dict[str, Any] = {}
         self._raw_tables: Dict[str, pd.DataFrame] = {}
         self._dag: List[Dict[str, Any]] = []
@@ -119,7 +118,7 @@ class DataPipelineEnv:
 
         # Check terminal condition
         all_passed    = all(r.passed for r in self._last_assertion_results)
-        max_steps_hit = self._step_number >= self.MAX_STEPS
+        max_steps_hit = self._step_number >= self.max_steps
         self._done    = all_passed or max_steps_hit
 
         # Terminal bonus
@@ -145,6 +144,9 @@ class DataPipelineEnv:
             "assertions_total":  len(self._last_assertion_results),
             "total_reward": round(self._reward_accumulator, 3),
         }
+
+    def close(self) -> None:
+        pass
 
     # ------------------------------------------------------------------ #
     # Action dispatcher
@@ -233,7 +235,6 @@ class DataPipelineEnv:
         if df is None:
             return -0.1, f"Table '{table}' not found."
 
-        self._inspected_tables.add(table)
         sample = df.head(n_rows)
         if filter_col and filter_col in df.columns:
             mask = df[filter_col].isna() if filter_val is None else (df[filter_col] == filter_val)
@@ -245,6 +246,7 @@ class DataPipelineEnv:
 
         # Reward: 0 for the first inspection of this table; -0.05 for repeated reads
         reward = 0.0 if table not in self._inspected_tables else -0.05
+        self._inspected_tables.add(table)
         return reward, msg
 
     def _act_check_schema(self, table: str) -> Tuple[float, str]:
@@ -598,7 +600,7 @@ class DataPipelineEnv:
             difficulty=self._task.get("difficulty", ""),
             description=self._task.get("description", ""),
             step_number=self._step_number,
-            max_steps=self.MAX_STEPS,
+            max_steps=self.max_steps,
             dag_structure=dag_nodes,
             failed_assertions=failed,
             passed_assertions=passed,
