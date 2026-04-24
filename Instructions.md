@@ -68,6 +68,12 @@ This file is the source of rules for this workspace.
     these with no human intervention."
 
 ### NICE-TO-HAVE
-- [ ] Reward curves from GRPO training showing mean episode reward improving vs. step.
-- [ ] Side-by-side comparison: before/after score table (easy/medium/hard/hard2) with delta.
-- [ ] Push trained model to HuggingFace Hub so judges can reproduce.
+- [x] Reward curves from GRPO training showing mean episode reward improving vs. step. (Implemented in all 3 training scripts)
+- [x] Side-by-side comparison: before/after score table (easy/medium/hard/hard2) with delta. (Implemented in all 3 training scripts)
+- [x] Push trained model to HuggingFace Hub so judges can reproduce. (Implemented in all 3 training scripts)
+
+---
+*Note: We have implemented 3 training variants:*
+1. `train_grpo_general.ipynb` / `train_grpo.py` (General Model Agnostic)
+2. `training_grpo_qwen.ipynb` (Qwen2.5-3B-Instruct for Kaggle T4)
+3. `training_grpo.ipynb` (Original LLaMA 8B with Gemini trajectories)

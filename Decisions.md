@@ -156,14 +156,27 @@ for credit assignment in a 20-step episode.
 
 ---
 
-### D-012 · Anti-repetition loop breaker in Qwen Kaggle notebook
+### D-012 · Prompt-based loop detection instead of harness-level action override
 **Date:** 2026-04-24
-**Decision:** Added `_detect_stuck_loop()` and `_get_unstuck_action()` to the Qwen notebook runner. When the model repeats the same action 3+ times consecutively, the system overrides it with a heuristically chosen action and trims conversation history to 4 turns.
+**Decision:** Replaced the harness-level `_detect_stuck_loop()` + `_get_unstuck_action()` approach (which silently overrode the model's chosen action) with a prompt-based approach: `_detect_action_loop()` parses `obs.actions_taken` (format: `[N] action_type({params})`) for 3+ identical actions or 2-step oscillation patterns. When detected, `_build_loop_hint()` injects a `[CRITICAL LOOP DETECTED]` section into the user prompt with assertion-specific fix suggestions. The runner trims history to 2 turns to break the repetitive context, but the model still decides its own next action.
 **Rationale:**
-- Smaller models (Qwen 3B) get trapped in action loops (e.g. `coalesce unit_price` → `run_pipeline` → repeat) because the accumulated history reinforces the pattern.
-- Trimming history breaks the learned loop by removing the repetitive context the model conditions on.
-- The heuristic fallback (`dedup` for medium, `read_data_sample` for run_pipeline loops) is derived from the gold fix actions for each task, so it nudges toward the correct solution.
-**Tradeoff:** Hard-coded heuristics reduce generality. Acceptable for a 3B model that lacks the reasoning to self-correct; larger models (8B+) with proper instruction following do not trigger the loop detector.
+- The original approach silently overrode the model's action, which masks the real problem (the model doesn't understand what to do) and prevents learning during GRPO training. If the harness takes the right action, the model gets reward for an action it never chose — poisoning the credit assignment.
+- Prompt-based hints let the model self-correct: it sees "LOOP DETECTED: you keep repeating coalesce on unit_price... uniqueness failure → the ONLY fix is dedup" and can choose dedup on its own.
+- History trimming (to 2 turns) is the critical complement — without it, the long repetitive context overwhelms the hint, and the small model falls back into the pattern.
+- This approach also works correctly with GRPO training: the model learns to respond to loop hints, not depend on external rescue.
+**Tradeoff:** If the model ignores the hint (possible with very weak models), the loop continues until max_steps. Acceptable because: (a) the hint is very explicit and assertion-specific, (b) history trimming breaks the pattern most of the time, (c) this preserves correct RL credit assignment.
+
+---
+
+### D-013 · Three-variant GRPO training architecture
+**Date:** 2026-04-24
+**Decision:** Implemented GRPO training as 3 separate scripts sharing the same reward function: (1) `train_grpo.py` general CLI, (2) `training_grpo_qwen.ipynb` for Qwen2.5-3B on Kaggle, (3) patched `training_grpo.ipynb` for LLaMA 8B with optional Gemini API trajectories.
+**Rationale:**
+- Different models have different VRAM profiles. Qwen 3B uses G=8 and r=32 (more samples + higher rank because the model is small). LLaMA 8B uses G=4 and r=16.
+- Chose Qwen2.5-3B (text-only) over Qwen2.5-VL-3B for training because the vision encoder adds ~7GB VRAM overhead with zero benefit for this text-only task.
+- The CLI script enables non-Kaggle training (local GPUs, cloud instances) and supports any HF model via `--model`.
+- Reward function is identical across all variants: env_step_reward + format_bonus + drift_bonus + loop_penalty. This ensures trained models are comparable.
+**Tradeoff:** Three separate files to maintain. Mitigated by using the same reward function and gold trajectory definitions.
 
 ---
 

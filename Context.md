@@ -40,10 +40,11 @@ Meta PyTorch OpenEnv Hackathon — Round 2 Grand Finale
   - historical_schema and schema_diff surfaced in prompt builder.
   - All dead commented code removed.
 - README.md CREATED: full submission README with obs/action spaces, task specs, reward model, setup.
-- training_grpo.ipynb CREATED: full SFT -> GRPO training notebook for Kaggle T4.
-  - Stage 1: SFT on gold trajectories from easy/medium tasks (~30 min).
-  - Stage 2: GRPO with live environment reward function, KL=0.1 (~60 min).
-  - Evaluation, reward curve plot, schema drift demo, HF Hub push.
+- 3 GRPO Training Variants Implemented:
+  1. `train_grpo.py` / `train_grpo_general.ipynb`: General Model-Agnostic CLI script and notebook (works with any HF model).
+  2. `training_grpo_qwen.ipynb`: Optimized for Qwen2.5-3B-Instruct (4-bit, LoRA r=32, `<think>` tag stripping) on Kaggle T4.
+  3. `training_grpo.ipynb`: LLaMA 8B notebook upgraded with Gemini API trajectory collector and loop penalty.
+  - All 3 scripts include: SFT stage, GRPO stage with shaped environment reward (format bonus, drift bonus, loop penalty), reward curve plotting, evaluation comparison table, and Hugging Face Hub push logic.
 
 ### Still Open (must complete before submission day)
 - GAP-004: Mini blog or 2-minute video (HuggingFace or YouTube).

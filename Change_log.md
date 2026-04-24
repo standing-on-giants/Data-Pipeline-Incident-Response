@@ -76,22 +76,59 @@
 - Schema drift demo cell: shows base model hallucinating old column name vs. trained model calling compare_schema first.
 - Hub push cell: pushes merged 16-bit model to HuggingFace Hub.
 
-### FIX: run_on_kaggle_qwen_new.ipynb — OpenEnv compliance and anti-repetition
+### FIX: run_on_kaggle_qwen_new.ipynb — OpenEnv compliance and anti-repetition (v2)
 - Fixed hard2 crash: runner now dynamically detects available tasks from `src.tasks.TASKS`
   instead of hardcoding `['easy', 'medium', 'hard', 'hard2']`. Skips missing tasks gracefully.
-- Added anti-repetition loop breaker (`_detect_stuck_loop` + `_get_unstuck_action`):
-  - Detects when model repeats the same action 3+ consecutive times.
-  - Forces a different action (dedup for medium, read_data_sample if stuck on run_pipeline).
-  - Trims history to 4 turns to break the learned repetition pattern.
-- Removed stale `getattr(obs, 'last_action_error')` — field does not exist in PipelineObservation model.
-- Tightened OOM history trim from 8 to 6 turns (Qwen VL uses more VRAM per token).
-- Tightened max history from 16 to 14 turns for same reason.
+- Replaced harness-level action override with prompt-based loop detection:
+  - `_detect_action_loop()` checks `obs.actions_taken` (format: `[N] action_type({params})`)
+    for 3+ identical consecutive actions OR 2-step oscillation patterns (A,B,A,B).
+  - `_build_loop_hint()` injects a [CRITICAL LOOP DETECTED] hint into the user prompt
+    with assertion-specific fix suggestions (e.g. "uniqueness failure → dedup").
+  - Runner trims history to 2 turns when loop is detected, breaking the repetitive context
+    while letting the model decide its own next action based on the hint.
+- Strengthened SYSTEM_PROMPT:
+  - Added explicit rule: "If a 'unique' assertion fails, the ONLY correct fix is dedup."
+  - Added rule: "NEVER repeat the same action you already tried."
+- Removed stale `getattr(obs, 'last_action_error')` — field does not exist in PipelineObservation.
+- Tightened OOM and max history bounds for Qwen VL memory constraints.
 
 ### FIX: openenv.yaml — handle_drift and hard2
 - Added `handle_drift` to `action_space.actions` (was missing since Round 2 added it natively).
 - Added `hard2` task definition with `max_steps: 30` and `n_assertions: 8`.
 
+### NEW: train_grpo.py — General CLI GRPO training script
+- Model-agnostic CLI script implementing full SFT -> GRPO pipeline.
+- Works with any HF causal LM via `--model` flag.
+- Gold trajectory collector for easy/medium/hard tasks.
+- Shaped reward function: env_step_reward + format_bonus(+0.3) + drift_bonus(+0.3).
+- `<think>` tag stripping for Qwen-family models.
+- Auto-detects available tasks from `src.tasks.TASKS` registry.
+- CLI flags: `--skip-sft`, `--grpo-only`, `--push-to-hub`, `--kl-coeff`, `--num-generations`.
+
+### NEW: training_grpo_qwen.ipynb — Qwen2.5-3B GRPO training notebook
+- Kaggle T4 notebook for Qwen2.5-3B-Instruct (text-only, NOT VL).
+- 4-bit quantization, LoRA r=32 (higher rank for smaller model).
+- G=8 completions per prompt (small model = more samples fit in VRAM).
+- 5 SFT epochs (more than LLaMA variant: smaller model needs more passes).
+- `<think>` tag stripping in action parser.
+
+### FIX: training_grpo.ipynb — LLaMA training improvements
+- Added optional Gemini 2.5 Flash API trajectory collector (`USE_GEMINI_TRAJECTORIES=True`).
+  - Runs episodes via Gemini API, filters for score > 0.8, merges with gold pairs.
+- Added loop_penalty (-0.5) to GRPO reward function for 3+ identical consecutive actions.
+- Added max_grad_norm=1.0 and warmup_ratio=0.05 for training stability.
+- Reduced max_new_tokens from 256 to 200 (actions are short JSON).
+
+### FIX: GRPOConfig API Updates for trl v0.8.x Compatibility
+- `max_new_tokens` -> `max_completion_length`: Renamed across all notebooks and scripts to align with newer `GRPOConfig` definitions.
+- `kl_coeff` -> `beta`: Renamed to match the PPO-style `beta` penalty argument in `trl`.
+- `max_seq_length` -> `max_prompt_length`: Replaced to prevent initialization errors in the config.
+- `average_tokens_across_devices=False`: Explicitly disabled to prevent Unsloth loss tensor `AttributeError: 'int' object has no attribute 'mean'` issues.
+- `report_to="none"`: Added to `TrainingArguments` to bypass implicit `wandb` API key hanging behavior in Kaggle environments.
+- `warmup_ratio=0.05` -> `warmup_steps=1` and `logging_steps=1`: Removed deprecation warnings and improved CLI verbosity during slow generation steps.
+
 ### REMAINING GAPS (still open before submission)
 - GAP-004: Mini blog or 2-minute video not yet recorded.
 - GAP-005: HuggingFace Space deployment and POST /reset HTTP 200 not yet verified.
 - GAP-006: openenv validate not yet run on openenv.yaml.
+
