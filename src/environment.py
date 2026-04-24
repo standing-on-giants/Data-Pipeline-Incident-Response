@@ -137,11 +137,19 @@ class DataPipelineEnv:
         max_steps_hit = self._step_number >= self.MAX_STEPS
         self._done    = all_passed or max_steps_hit
 
-        # Terminal bonus
+        # Terminal bonus: scaled by step efficiency.
+        # Full +2.0 if solved in ≤ 30 % of budget, decays linearly to +1.0 at 100 %.
+        # This incentivises concise diagnosis → fix → run sequences.
         if all_passed:
-            reward += 1.0
-            self._reward_accumulator += 1.0
-            self._last_action_result += " [PASSED] ALL ASSERTIONS PASSING — episode complete!"
+            budget_used = self._step_number / max(self.MAX_STEPS, 1)
+            efficiency_scale = 1.0 + max(0.0, 1.0 - budget_used / 0.3)
+            terminal_bonus = round(efficiency_scale, 3)
+            reward += terminal_bonus
+            self._reward_accumulator += terminal_bonus
+            self._last_action_result += (
+                f" [PASSED] ALL ASSERTIONS PASSING — episode complete! "
+                f"Efficiency bonus: +{terminal_bonus:.2f}"
+            )
         elif max_steps_hit and not all_passed:
             self._last_action_result += " [WARNING] Max steps reached."
 
@@ -271,20 +279,26 @@ class DataPipelineEnv:
         msg = (f"Showing {len(sample)} rows from '{table}' "
                f"({'filtered' if filter_col else 'unfiltered'}).")
 
-        # 0 reward for first inspection; small penalty for repeated reads
-        reward = 0.0 if is_first_inspection else -0.05
+        # +0.15 for the first inspection of a table (rewarding diagnosis effort),
+        # -0.2 for any repeat (strong enough to deter spam, mild enough not to
+        # punish a necessary second look).
+        reward = 0.15 if is_first_inspection else -0.2
+        if not is_first_inspection:
+            msg += " [PENALTY]: table already inspected — re-reading wastes a step."
         return reward, msg
 
     def _act_check_schema(self, table: str) -> Tuple[float, str]:
         schemas = self._task.get("schemas", {})
-        # Penalise repeated schema checks on the same table
-        repeat_penalty = -0.1 if table in self._schema_compared_tables else 0.0
+        # +0.1 for first schema check (useful diagnostic step),
+        # -0.2 for repeats (stronger deterrent than old -0.1 to discourage looping).
+        is_first = table not in self._schema_compared_tables
+        repeat_penalty = 0.1 if is_first else -0.2
         self._schema_compared_tables.add(table)
         if table in schemas:
             self._last_schema = schemas[table]["current"]
             self._inspected_tables.add(table)
             msg = f"Schema for '{table}' loaded."
-            if repeat_penalty < 0:
+            if not is_first:
                 msg += " [PENALTY]: already checked this schema."
             return repeat_penalty, msg
         # Try to infer from raw table
@@ -293,7 +307,7 @@ class DataPipelineEnv:
             self._last_schema = {c: str(df[c].dtype) for c in df.columns}
             self._inspected_tables.add(table)
             msg = f"Inferred schema for '{table}'."
-            if repeat_penalty < 0:
+            if not is_first:
                 msg += " [PENALTY]: already checked this schema."
             return repeat_penalty, msg
         return -0.1, f"No schema info found for '{table}'."
@@ -301,13 +315,15 @@ class DataPipelineEnv:
     def _act_compare_schema(self, table: str) -> Tuple[float, str]:
         schemas = self._task.get("schemas", {})
         if table not in schemas:
-            # Still penalise repeats on no-schema tables
-            penalty = -0.1 if table in self._schema_compared_tables else -0.1
+            # No schema to compare — always a wasted step
             self._schema_compared_tables.add(table)
-            return penalty, f"No historical schema for '{table}'."
+            return -0.1, f"No historical schema for '{table}'."
 
-        # Penalise repeated compare_schema on the same table
-        repeat_penalty = -0.1 if table in self._schema_compared_tables else 0.0
+        # compare_schema is the most informative diagnostic action (reveals drift).
+        # +0.15 first call; -0.25 on repeats — steeper than check_schema since there
+        # is no new information to be gained from running it twice.
+        is_first = table not in self._schema_compared_tables
+        repeat_penalty = 0.15 if is_first else -0.25
         self._schema_compared_tables.add(table)
 
         cur  = schemas[table]["current"]
@@ -328,7 +344,7 @@ class DataPipelineEnv:
         self._last_schema_diff = diff if diff else {"info": "No schema changes detected."}
         self._inspected_tables.add(table)
         msg = f"Schema diff for '{table}' loaded. {len(diff)} change(s) detected."
-        if repeat_penalty < 0:
+        if not is_first:
             msg += " [PENALTY]: already compared this schema."
         return repeat_penalty, msg
 
@@ -345,8 +361,26 @@ class DataPipelineEnv:
             for r in self._last_assertion_results
         ]
         status = "PASSED" if result.passed else "FAILED"
-        return 0.0, (f"Assertion {assertion_id} re-run: {status}. "
-                     f"{result.actual}")
+        # Small positive reward when re-running a targeted assertion surfaces a
+        # failure (useful diagnostic signal); neutral when it was already known;
+        # small penalty when re-running a known-passing assertion (wasted step).
+        prev = next(
+            (r for r in self._last_assertion_results if r.assertion_id == assertion_id),
+            None,
+        )
+        if result.passed and prev and not prev.passed:
+            # Just fixed via a patch — no need to use this action for confirmation
+            r = 0.05
+        elif not result.passed and prev and prev.passed:
+            # Regression detected — surfacing it is valuable
+            r = 0.1
+        elif result.passed:
+            # Checking an already-passing assertion: wasted step
+            r = -0.1
+        else:
+            # Checking an already-known failure adds no new information
+            r = -0.05
+        return r, (f"Assertion {assertion_id} re-run: {status}. {result.actual}")
 
     def _act_handle_drift(
         self,
@@ -550,12 +584,24 @@ class DataPipelineEnv:
         gained  = new_passed_ids - prev_passed_ids
         lost    = prev_passed_ids - new_passed_ids
 
-        reward  = len(gained) * 0.4 - len(lost) * 0.5
+        # Base reward: each newly passing assertion is worth +0.4;
+        # each regression costs -0.5 (asymmetric: regressions hurt more).
+        reward = len(gained) * 0.4 - len(lost) * 0.5
 
-        # Zero-progress penalty: discourage repeated run_pipeline with no effect.
-        # Only applies when no assertions were gained OR lost (pure no-op run).
+        # No-progress penalty: agent ran the pipeline without applying any fix.
+        # Scaled by how far into the step budget we are — the later in the episode,
+        # the more expensive it is to waste a run.
         if len(gained) == 0 and len(lost) == 0:
-            reward -= 0.15
+            budget_fraction = self._step_number / max(self.MAX_STEPS, 1)
+            # Ranges from -0.2 early in episode to -0.5 near the step limit.
+            no_progress_penalty = -(0.2 + 0.3 * budget_fraction)
+            reward += no_progress_penalty
+        elif len(gained) > 0:
+            # Efficiency bonus: reward solving faster.  Full bonus (+0.3) if under
+            # 40 % of budget used; linearly decays to 0 at 80 % budget used.
+            budget_fraction = self._step_number / max(self.MAX_STEPS, 1)
+            efficiency_bonus = max(0.0, 0.3 * (1.0 - budget_fraction / 0.8))
+            reward += efficiency_bonus
 
         self._last_assertion_results = new_results
         self._prev_passed_ids        = new_passed_ids
