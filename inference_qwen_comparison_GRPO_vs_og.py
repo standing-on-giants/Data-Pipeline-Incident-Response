@@ -299,6 +299,31 @@ def build_user_prompt(obs: PipelineObservation, step: int) -> str:
     """).strip()
 
 # ------------------------------------------------------------------ #
+# OpenEnv stdout logging (spec-required — do not modify format)
+# ------------------------------------------------------------------ #
+
+def log_start(task: str, env: str, model: str) -> None:
+    print(f"[START] task={task} env={env} model={model}", flush=True)
+
+def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str]) -> None:
+    error_val   = error if error else "null"
+    done_val    = str(done).lower()
+    action_safe = action.replace("\n", " ").replace("\r", "")[:200]
+    print(
+        f"[STEP] step={step} action={action_safe} reward={reward:.2f} "
+        f"done={done_val} error={error_val}",
+        flush=True,
+    )
+
+def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
+    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
+    print(
+        f"[END] success={str(success).lower()} steps={steps} "
+        f"score={score:.2f} rewards={rewards_str}",
+        flush=True,
+    )
+
+# ------------------------------------------------------------------ #
 # Runner
 # ------------------------------------------------------------------ #
 
@@ -308,14 +333,30 @@ def run_episode(model, tokenizer, task_id: str, max_steps: int = MAX_STEPS, verb
     rewards = []
     steps_taken = 0
     score = 0.0
+    success = False
     n_passed = 0
     n_total = 0
     pipeline_passed = False
 
+    log_start(task=task_id, env=BENCHMARK, model=BASE_MODEL_ID)
+
     try:
         obs = env.reset()
+
+        if verbose:
+            print(f"\n{'='*60}", file=sys.stderr)
+            print(f"TASK: {task_id.upper()}", file=sys.stderr)
+            print(f"{'='*60}", file=sys.stderr)
+            print(f"Description: {obs.description}", file=sys.stderr)
+            n_fail = len(obs.failed_assertions)
+            print(f"Initial failing assertions: {n_fail}", file=sys.stderr)
+
         for step in range(1, max_steps + 1):
-            if obs.pipeline_passed: break
+            if obs.pipeline_passed:
+                if verbose:
+                    print(f"\n[PASSED] Pipeline passed at step {step - 1}!", file=sys.stderr)
+                break
+            
             user_prompt = build_user_prompt(obs, step)
             history.append({'role': 'user', 'content': user_prompt})
             messages = [{'role': 'system', 'content': SYSTEM_PROMPT}] + history
@@ -340,21 +381,50 @@ def run_episode(model, tokenizer, task_id: str, max_steps: int = MAX_STEPS, verb
             
             result = env.step(action)
             obs = result.observation
-            rewards.append(result.reward or 0.0)
+            reward = result.reward or 0.0
+            done = result.done
+            error: Optional[str] = getattr(obs, "last_action_error", None) or None
+
+            rewards.append(reward)
             steps_taken = step
-            if result.done: break
+
+            log_step(
+                step=step,
+                action=json.dumps(action.model_dump()).replace("\n", " ")[:200],
+                reward=reward,
+                done=done,
+                error=error,
+            )
+
+            if verbose:
+                print(f"\n[Step {step}] Raw response: {response_text[:120]}", file=sys.stderr)
+                print(f"[Step {step}] Action: {action.action_type}({action.params})", file=sys.stderr)
+                print(f"  Reward: {reward:+.2f} | "
+                      f"Passed: {len(obs.passed_assertions)}/{len(obs.failed_assertions)+len(obs.passed_assertions)} | "
+                      f"Result: {obs.last_action_result[:80]}", file=sys.stderr)
+
+            if done: break
 
         n_total = len(obs.failed_assertions) + len(obs.passed_assertions)
         n_passed = len(obs.passed_assertions)
         pipeline_passed = obs.pipeline_passed
         raw_score = n_passed / n_total if n_total > 0 else 0.0
         score = min(max(raw_score, 0.01), 0.99)
+        success = score >= SUCCESS_SCORE_THRESHOLD
+        
+        if verbose:
+            print(f"\n--- Episode Summary ---", file=sys.stderr)
+            print(f"  Score (assertion pass rate): {score:.2f}", file=sys.stderr)
+            print(f"  Total reward:                {sum(rewards):.2f}", file=sys.stderr)
+            print(f"  Steps taken:                 {steps_taken}", file=sys.stderr)
+            print(f"  Pipeline passed:             {pipeline_passed}", file=sys.stderr)
         
     except Exception as exc:
         print(f"[ERROR] {task_id}: {exc}", file=sys.stderr)
     finally:
         try: env.close()
         except: pass
+        log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
     
     return {
         'task_id': task_id,
@@ -367,15 +437,15 @@ def run_episode(model, tokenizer, task_id: str, max_steps: int = MAX_STEPS, verb
     }
 
 def collect_results(model_name: str, model_type: str, model, tokenizer, tasks: list):
-    print(f"\\n{'='*60}\\nEvaluating Model: {model_name} [{model_type}]\\n{'='*60}")
+    print(f"\n{'='*60}\nEvaluating Model: {model_name} [{model_type}]\n{'='*60}", file=sys.stderr)
     results = []
     for task_id in tasks:
-        r = run_episode(model, tokenizer, task_id, max_steps=MAX_STEPS, verbose=False)
+        r = run_episode(model, tokenizer, task_id, max_steps=MAX_STEPS, verbose=True)
         results.append(r)
         status = '[PASSED]' if r['pipeline_passed'] else '[FAILED]'
-        print(f"  {r['task_id']:8s} | score={r['score']:.2f} | reward={r['total_reward']:+.2f} | steps={r['steps_taken']:2d} | {status}")
+        print(f"  {r['task_id']:8s} | score={r['score']:.2f} | reward={r['total_reward']:+.2f} | steps={r['steps_taken']:2d} | {status}", file=sys.stderr)
     avg_score = sum(r['score'] for r in results) / max(1, len(results))
-    print(f"  --> Average Score: {avg_score:.4f}\\n")
+    print(f"  --> Average Score: {avg_score:.4f}\n", file=sys.stderr)
     return results
 
 def main():
