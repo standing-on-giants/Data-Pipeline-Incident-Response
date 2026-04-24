@@ -171,16 +171,30 @@ def _call_model(messages: list) -> str:
     torch.cuda.empty_cache()
     inputs = tokenizer.apply_chat_template(
         messages, tokenize=True, add_generation_prompt=True, return_tensors='pt'
-    ).to(model.device)
-    with torch.no_grad():
-        out_ids = model.generate(
-            inputs,
-            max_new_tokens=MAX_TOKENS,
-            temperature=max(TEMPERATURE, 0.01),
-            do_sample=True,
-            pad_token_id=tokenizer.eos_token_id,
-        )
-    raw = tokenizer.decode(out_ids[0][inputs.shape[1]:], skip_special_tokens=True)
+    )
+    if hasattr(inputs, 'items'):
+        inputs = inputs.to(model.device)
+        input_len = inputs['input_ids'].shape[1]
+        with torch.no_grad():
+            out_ids = model.generate(
+                **inputs,
+                max_new_tokens=MAX_TOKENS,
+                temperature=max(TEMPERATURE, 0.01),
+                do_sample=True,
+                pad_token_id=tokenizer.eos_token_id,
+            )
+    else:
+        inputs = inputs.to(model.device)
+        input_len = inputs.shape[1]
+        with torch.no_grad():
+            out_ids = model.generate(
+                inputs,
+                max_new_tokens=MAX_TOKENS,
+                temperature=max(TEMPERATURE, 0.01),
+                do_sample=True,
+                pad_token_id=tokenizer.eos_token_id,
+            )
+    raw = tokenizer.decode(out_ids[0][input_len:], skip_special_tokens=True)
     return _strip_think(raw)
 
 
