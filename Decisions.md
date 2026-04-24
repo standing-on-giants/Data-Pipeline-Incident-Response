@@ -225,6 +225,16 @@ for credit assignment in a 20-step episode.
 
 ---
 
+### D-018 · Qwen 1.5B Prompt Tuning: Action History & Repetition Warnings
+**Date:** 2026-04-25
+**Decision:** Updated `create_qwen_1_5b_notebook.py` to feed the last 20 actions (instead of 5) into the `obs.actions_taken` section of the prompt. Additionally, added a strict rule to the `SYSTEM_PROMPT` warning that repeating actions wastes step budget and incurs severe penalties.
+**Rationale:**
+- The 1.5B model struggled to escape loops because it could only "see" 5 steps into the past, losing track of its earlier failed attempts.
+- By providing a longer trajectory window (20 actions) and explicitly underlining the consequences of wasting the step budget in the prompt rules, we give the model enough context and incentive to break out of its own repetitive cycles.
+**Tradeoff:** A slight increase in token usage per step due to the longer action history, but acceptable given the strict truncation applied elsewhere in the notebook runner.
+
+---
+
 ## Template for New Entries
 
 ### D-XXX - Short title

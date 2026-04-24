@@ -270,6 +270,7 @@ FILTER OPERATORS (only these are supported): IS NOT NULL | IS NULL | >= | <=
 RULES:
 - ONLY JSON. No explanation.
 - Never fix before reading data (-0.5 penalty).
+- NEVER repeat actions! Repeating the same check or re-running the pipeline without applying a new fix wastes your limited step budget and incurs severe negative penalties.
 - Stop when pipeline_passed is true.
 \"\"\").strip()
 
