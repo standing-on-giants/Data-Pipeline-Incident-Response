@@ -214,6 +214,12 @@ def parse_llm_response(text: str) -> PipelineAction:
 
 
 print(f'Config ready. MAX_STEPS={MAX_STEPS}, MAX_TOKENS={MAX_TOKENS}, TEMPERATURE={TEMPERATURE}')
+
+# ── Context safety limits for 1.5B model ──────────────────────────────────
+# 1.5B model has a 32k context, but long histories cause silent OOM / empty output.
+# Keep the prompt short: cap history and truncate the user message.
+MAX_HISTORY_TURNS  = 6      # max (user, assistant) pairs kept in history
+MAX_PROMPT_CHARS   = 3000   # truncate user prompt beyond this many chars
 """, "cell-config"))
 
 CELLS.append(code_cell("""
