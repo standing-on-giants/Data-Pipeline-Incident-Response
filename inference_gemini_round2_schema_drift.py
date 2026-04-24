@@ -47,7 +47,7 @@ MAX_TOKENS     = int(os.getenv("MAX_TOKENS", "1024"))
 
 SUCCESS_SCORE_THRESHOLD = 0.1   # score in [0, 1] to count as success
 
-FALLBACK_ACTION = PipelineAction(action_type="compare_schema", params={"table": "raw_ads_insights"})
+# Smart fallback logic is now handled dynamically in the runner loop.
 
 # ------------------------------------------------------------------ #
 # OpenEnv stdout logging (spec-required — do not modify format)
@@ -321,13 +321,13 @@ def parse_llm_response(text: str) -> PipelineAction:
     """Extract, normalize and validate a PipelineAction from the model response."""
     payload = _extract_action_payload(text)
     if not payload:
-        return FALLBACK_ACTION
+        return None
 
     normalized = _normalize_action_payload(payload)
     try:
         return PipelineAction(**normalized)
     except Exception:
-        return FALLBACK_ACTION
+        return None
 
 
 def _extract_action_payload(text: str) -> Optional[dict]:
@@ -489,15 +489,21 @@ def run_episode(
 
             action = parse_llm_response(response_text)
 
-            # Smart fallback: if model returned empty/garbage and action is run_pipeline,
-            # convert the wasted step into a diagnostic compare_schema instead
-            if action.action_type == "run_pipeline" and not response_text.strip():
+            # Smart fallback: if parser failed or run_pipeline is spammed empty,
+            # dynamically inspect the correct failing table
+            if action is None or (action.action_type == "run_pipeline" and not response_text.strip()):
+                target_table = None
                 if obs.failed_assertions:
                     target_table = obs.failed_assertions[0].table
-                    action = PipelineAction(
-                        action_type="compare_schema",
-                        params={"table": target_table}
-                    )
+                elif obs.dag_structure:
+                    target_table = obs.dag_structure[0].input_table
+                else:
+                    target_table = "unknown_table"
+                
+                action = PipelineAction(
+                    action_type="compare_schema" if action is not None else "read_data_sample",
+                    params={"table": target_table, "n_rows": 20} if action is None else {"table": target_table}
+                )
             
             history.append({"role": "assistant", "content": response_text or "{}"})
             # Keep history bounded to last 20 messages to avoid token limit

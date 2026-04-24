@@ -146,8 +146,7 @@ TEMPERATURE = float(os.getenv('TEMPERATURE', '0.1'))
 MAX_STEPS   = int(os.getenv('MAX_STEPS', '100'))
 
 SUCCESS_SCORE_THRESHOLD = 0.1
-# Smart fallback: read data sample instead of repeating compare_schema
-FALLBACK_ACTION = PipelineAction(action_type='read_data_sample', params={'table': 'raw_ads_insights', 'n_rows': 20})
+# Smart fallback logic is now handled dynamically in the runner loop.
 
 
 # ── OpenEnv stdout logging ─────────────────────────────────────────────────
@@ -199,15 +198,15 @@ def _call_model(messages: list) -> str:
 
 
 # ── Action parser ──────────────────────────────────────────────────────────
-def parse_llm_response(text: str) -> PipelineAction:
+def parse_llm_response(text: str) -> Optional[PipelineAction]:
     if not text:
-        return FALLBACK_ACTION
+        return None
     text = text.strip()
     if '```' in text:
         text = '\\n'.join(l for l in text.split('\\n') if not l.strip().startswith('```'))
     start = text.find('{')
     if start == -1:
-        return FALLBACK_ACTION
+        return None
     end = text.rfind('}') + 1
     if end > start:
         try:
@@ -224,7 +223,7 @@ def parse_llm_response(text: str) -> PipelineAction:
                 return PipelineAction(**{'action_type': data['action_type'], 'params': data.get('params', {})})
         except Exception:
             continue
-    return FALLBACK_ACTION
+    return None
 
 
 print(f'Config ready. MAX_STEPS={MAX_STEPS}, MAX_TOKENS={MAX_TOKENS}, TEMPERATURE={TEMPERATURE}')
@@ -422,6 +421,19 @@ def run_episode(task_id: str, max_steps: int = MAX_STEPS, verbose: bool = True) 
                 history = history[-4:]
 
             action = parse_llm_response(response_text)
+
+            if action is None:
+                target_table = None
+                if obs.failed_assertions:
+                    target_table = obs.failed_assertions[0].table
+                elif obs.dag_structure:
+                    target_table = obs.dag_structure[0].input_table
+                else:
+                    target_table = "unknown_table"
+                action = PipelineAction(
+                    action_type='read_data_sample',
+                    params={'table': target_table, 'n_rows': 20}
+                )
 
             history.append({'role': 'assistant', 'content': response_text or '{}'})
 
