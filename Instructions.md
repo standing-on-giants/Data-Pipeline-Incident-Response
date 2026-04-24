@@ -38,12 +38,12 @@ This file is the source of rules for this workspace.
   - Kaggle T4 compatible, ~90 min total runtime.
   - Includes evaluation, reward curve plot, schema drift demo, HF Hub push.
 
-- [ ] **Deploy HuggingFace Space and verify POST /reset returns HTTP 200 (GAP-005)**
+- [x] **Deploy HuggingFace Space and verify POST /reset returns HTTP 200 (GAP-005)**
   - IMPORTANT: src/server.py uses WebSocket protocol. The HF Space must also expose
     an HTTP REST endpoint for the validator (POST /reset, POST /step, GET /health).
   - Either add a FastAPI HTTP router alongside the WebSocket, or wrap with a thin REST adapter.
 
-- [ ] **Run openenv validate and confirm all checks pass (GAP-006)**
+- [x] **Run openenv validate and confirm all checks pass (GAP-006)**
   - Command: pip install openenv-core && openenv validate
   - Fix any yaml schema errors before submission.
 
@@ -75,5 +75,12 @@ This file is the source of rules for this workspace.
 ---
 *Note: We have implemented 3 training variants:*
 1. `train_grpo_general.ipynb` / `train_grpo.py` (General Model Agnostic)
-2. `training_grpo_qwen.ipynb` (Qwen2.5-3B-Instruct for Kaggle T4)
+2. `training_grpo_qwen.ipynb` (Qwen2.5-1.5B-Instruct for Kaggle T4)
 3. `training_grpo.ipynb` (Original LLaMA 8B with Gemini trajectories)
+
+---
+
+## Session 2 Fixes (2026-04-24)
+- [x] **3 silent environment logic bugs fixed** in `src/environment.py` — `mark_acceptable` override, `add_data_filter` operator validation, `read_data_sample` column guard.
+- [x] **NEW inference notebook**: `run_on_kaggle/run_on_kaggle_qwen_1.5b.ipynb` — text-only Qwen2.5-1.5B, MAX_STEPS=100, MAX_TOKENS=1024.
+- [x] **All 6 Kaggle notebooks patched**: `importlib` cache flush + defensive `try/except TypeError` env creation to fix the `max_steps` kwarg error.

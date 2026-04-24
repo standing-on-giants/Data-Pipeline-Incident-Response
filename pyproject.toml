@@ -1,0 +1,18 @@
+[project]
+name = "data-pipeline-incident-response"
+version = "1.0.0"
+description = "A real-world RL environment where an agent diagnoses and fixes broken data pipelines."
+authors = [
+    {name = "AGI Quest Team"}
+]
+dependencies = [
+    "pandas",
+    "numpy",
+    "fastapi",
+    "uvicorn",
+    "pydantic",
+    "openenv-core>=0.2.0"
+]
+
+[project.scripts]
+server = "server.app:main"

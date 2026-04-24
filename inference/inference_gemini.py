@@ -1,15 +1,15 @@
 """
-inference_gemini_round2_schema_drift.py — Data Pipeline Agent (Round 2 Schema Drift)
-====================================================================================
+new_inference.py — Data Pipeline Incident Response Agent  (Gemini 2.5 Flash via OpenAI APICompat)
+================================================================================================
 Uses Google Gemini 2.5 Flash via the standard OpenAI Python SDK using the OpenAI compatibility endpoint.
 
 MANDATORY environment variables:
   GEMINI_API_KEY   Your Google Gemini API key
 
 Usage:
-    python inference_gemini_round2_schema_drift.py
-    python inference_gemini_round2_schema_drift.py --task easy
-    python inference_gemini_round2_schema_drift.py --task hard --steps 25
+  python new_inference.py
+  python new_inference.py --task easy
+  python new_inference.py --task hard --steps 25
 """
 from __future__ import annotations
 import argparse
@@ -40,39 +40,11 @@ API_BASE_URL   = "https://generativelanguage.googleapis.com/v1beta/openai/"
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or "MISSING_KEY"
 MODEL_NAME     = os.getenv("MODEL_NAME") or "gemini-2.5-flash"
 
-BENCHMARK      = "data_pipeline"
 MAX_STEPS      = int(os.getenv("MAX_STEPS", "30"))
 TEMPERATURE    = float(os.getenv("TEMPERATURE", "0.1"))
 MAX_TOKENS     = int(os.getenv("MAX_TOKENS", "1024"))
 
-SUCCESS_SCORE_THRESHOLD = 0.1   # score in [0, 1] to count as success
-
-FALLBACK_ACTION = PipelineAction(action_type="compare_schema", params={"table": "insights_ads"})
-
-# ------------------------------------------------------------------ #
-# OpenEnv stdout logging (spec-required — do not modify format)
-# ------------------------------------------------------------------ #
-
-def log_start(task: str, env: str, model: str) -> None:
-    print(f"[START] task={task} env={env} model={model}", flush=True)
-
-def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str]) -> None:
-    error_val   = error if error else "null"
-    done_val    = str(done).lower()
-    action_safe = action.replace("\n", " ").replace("\r", "")[:200]
-    print(
-        f"[STEP] step={step} action={action_safe} reward={reward:.2f} "
-        f"done={done_val} error={error_val}",
-        flush=True,
-    )
-
-def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
-    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
-    print(
-        f"[END] success={str(success).lower()} steps={steps} "
-        f"score={score:.2f} rewards={rewards_str}",
-        flush=True,
-    )
+FALLBACK_ACTION = PipelineAction(action_type="run_pipeline", params={})
 
 # ------------------------------------------------------------------ #
 # System prompt
@@ -87,13 +59,11 @@ historical run info) and must choose ONE action to take each turn.
 WORKFLOW (follow this order strictly):
 1. FIRST: read_data_sample on the raw input table(s) to see what the data looks like.
 2. THEN: Use check_schema or compare_schema if a type or schema issue is suspected.
-3. If you see any schema drift signal (renamed/missing columns, changed types, auth format drift,
-   or stricter rate-limit behavior), use handle_drift.
-4. THEN: Apply the RIGHT fix using add_data_filter or patch_transformation.
-5. THEN: Call run_pipeline to verify the fix.
-6. ONLY AFTER fixing what you can: If some data is genuinely corrupted (e.g. "N/A" values
+3. THEN: Apply the RIGHT fix using add_data_filter or patch_transformation.
+4. THEN: Call run_pipeline to verify the fix.
+5. ONLY AFTER fixing what you can: If some data is genuinely corrupted (e.g. "N/A" values
    that cannot be parsed), call alert_upstream_team.
-7. If assertions are still failing after run_pipeline, investigate more and apply
+6. If assertions are still failing after run_pipeline, investigate more and apply
    additional fixes. Do NOT just call run_pipeline again without changing something.
 
 AVAILABLE ACTIONS (respond with ONLY a JSON object, no markdown, no prose):
@@ -101,7 +71,6 @@ AVAILABLE ACTIONS (respond with ONLY a JSON object, no markdown, no prose):
 {"action_type": "read_data_sample", "params": {"table": "<table_name>", "n_rows": 20}}
 {"action_type": "check_schema", "params": {"table": "<table_name>"}}
 {"action_type": "compare_schema", "params": {"table": "<table_name>"}}
-{"action_type": "handle_drift", "params": {"strategy": "<detect|numeric_format|null_fill|type_cast|join_key_prefix|filter_invalid|resolve_column_rename|alert_upstream>", "table": "<table_name_optional>", "step_id": "<step_id_optional>", "column": "<column_optional>", "old_column": "<optional_old_name>", "new_column": "<optional_new_name>", "filter_condition": "<optional>", "team": "<optional>", "issue_description": "<optional>"}}
 {"action_type": "run_quality_assertion", "params": {"assertion_id": "<e.g. A1>"}}
 {"action_type": "add_data_filter", "params": {"step_id": "<step_id>", "filter_condition": "<e.g. user_id IS NOT NULL>"}}
 {"action_type": "patch_transformation", "params": {"step_id": "<step_id>", "patch_type": "<cast_column|coalesce|dedup|parse_currency|strip_prefix>", "column": "<column_name>"}}
@@ -124,19 +93,6 @@ KEY PATCH TYPES (you can chain multiple patches on the same step — they run in
 - strip_prefix: Use when column values have a spurious prefix like "CMP_" that needs removal.
   Params: step_id, column. Optionally "prefix" (default "CMP_"). After stripping, chain cast_column
   if the underlying value should be numeric.
-
-DRIFT HANDLING RULES:
-- Use handle_drift when schema or contract changes between runs.
-- handle_drift strategy mapping:
-    detect -> compare_schema
-    numeric_format -> patch_transformation(parse_currency)
-    null_fill -> patch_transformation(coalesce)
-    type_cast -> patch_transformation(cast_column)
-    join_key_prefix -> patch_transformation(strip_prefix)
-    filter_invalid -> add_data_filter
-    resolve_column_rename -> restore compatibility for renamed columns (e.g. spend <- total_spend)
-    alert_upstream -> alert_upstream_team
-- For spend -> total_spend style drift, compare schema first, then patch transformations to align types.
 
 UPSTREAM TEAM NAMING:
 - Team names are always lowercase snake_case. Examples: meta_ads_api_team, data_engineering, vendor_support.
@@ -180,7 +136,7 @@ def build_user_prompt(obs: PipelineObservation, step: int) -> str:
 
     hist_str = "\n".join(
         f"  {r.date}: {r.status} ({r.row_count} rows)"
-        for r in obs.historical_runs
+        for r in obs.historical_runs[-2:]
     )
 
     sample_str = ""
@@ -205,11 +161,6 @@ def build_user_prompt(obs: PipelineObservation, step: int) -> str:
         schema_str = "\nCURRENT SCHEMA: " + json.dumps(obs.current_schema)
     if obs.schema_diff:
         schema_str += "\nSCHEMA DIFF vs HISTORICAL: " + json.dumps(obs.schema_diff)
-
-    drift_signals = _collect_schema_drift_signals(obs)
-    drift_str = ""
-    if drift_signals:
-        drift_str = "\nSCHEMA DRIFT SIGNALS:\n" + "\n".join(f"  - {s}" for s in drift_signals)
 
     actions_str = "\n".join(f"  {a}" for a in obs.actions_taken[-5:]) or "  (none yet)"
 
@@ -275,42 +226,10 @@ def build_user_prompt(obs: PipelineObservation, step: int) -> str:
 
     RECENT ACTIONS TAKEN:
     {actions_str}
-    {sample_str}{schema_str}{drift_str}{hint_str}
+    {sample_str}{schema_str}{hint_str}
 
     Respond with exactly ONE action JSON object.
     """).strip()
-
-
-def _collect_schema_drift_signals(obs: PipelineObservation) -> List[str]:
-    signals: List[str] = []
-    desc = (obs.description or "").lower()
-    if "schema drift" in desc or "contract" in desc:
-        signals.append("Task description references schema/contract drift.")
-
-    if obs.schema_diff:
-        schema_diff_json = json.dumps(obs.schema_diff).lower()
-        if "removed" in schema_diff_json:
-            signals.append("Historical columns appear removed in current schema.")
-        if "changed" in schema_diff_json:
-            signals.append("Column types differ from historical schema.")
-        if "new" in schema_diff_json:
-            signals.append("New columns detected relative to historical schema.")
-
-    for r in obs.failed_assertions:
-        actual = (r.actual or "").lower()
-        if "missing" in actual and "column" in actual:
-            signals.append(f"Assertion {r.assertion_id} reports a missing column.")
-        if "not found" in actual and "column" in actual:
-            signals.append(f"Assertion {r.assertion_id} reports a renamed or deleted column.")
-        if "type" in actual and ("object" in actual or "string" in actual):
-            signals.append(f"Assertion {r.assertion_id} indicates possible type drift.")
-
-    # Keep signal list concise and deterministic
-    deduped: List[str] = []
-    for s in signals:
-        if s not in deduped:
-            deduped.append(s)
-    return deduped[:6]
 
 
 # ------------------------------------------------------------------ #
@@ -318,59 +237,45 @@ def _collect_schema_drift_signals(obs: PipelineObservation) -> List[str]:
 # ------------------------------------------------------------------ #
 
 def parse_llm_response(text: str) -> PipelineAction:
-    """Extract, normalize and validate a PipelineAction from the model response."""
-    payload = _extract_action_payload(text)
-    if not payload:
-        return FALLBACK_ACTION
-
-    normalized = _normalize_action_payload(payload)
-    try:
-        return PipelineAction(**normalized)
-    except Exception:
-        return FALLBACK_ACTION
-
-
-def _extract_action_payload(text: str) -> Optional[dict]:
-    """Extract raw action JSON payload, including repair attempts for truncated output."""
+    """Extract and validate a PipelineAction from the model's response text.
+    Handles truncated JSON by attempting to close incomplete objects."""
     if not text:
-        return None
+        return FALLBACK_ACTION
 
     text = text.strip()
+    # Strip markdown code fences if present
     if "```" in text:
         lines = text.split("\n")
-        text = "\n".join(l for l in lines if not l.strip().startswith("```"))
+        text = "\n".join(
+            l for l in lines
+            if not l.strip().startswith("```")
+        ).strip()
 
+    # Find first {...} block
     start = text.find("{")
     if start == -1:
-        return None
+        return FALLBACK_ACTION
 
     end = text.rfind("}") + 1
+
     if end > start:
+        json_str = text[start:end]
         try:
-            data = json.loads(text[start:end])
-            if isinstance(data, dict) and "action_type" in data:
-                return data
+            data = json.loads(json_str)
+            return PipelineAction(**data)
         except Exception:
             pass
 
+    # JSON might be truncated — attempt to repair
     fragment = text[start:]
     repaired = _try_repair_json(fragment)
-    if repaired and isinstance(repaired, dict):
-        return repaired
-    return None
+    if repaired:
+        try:
+            return PipelineAction(**repaired)
+        except Exception:
+            pass
 
-
-def _normalize_action_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Normalize action payload while preserving native handle_drift support."""
-    action_type = str(payload.get("action_type", "")).strip()
-    params = payload.get("params") or {}
-    if not isinstance(params, dict):
-        params = {}
-
-    if action_type != "handle_drift":
-        return {"action_type": action_type, "params": params}
-
-    return {"action_type": "handle_drift", "params": params}
+    return FALLBACK_ACTION
 
 
 def _try_repair_json(fragment: str) -> Optional[dict]:
@@ -437,134 +342,98 @@ def run_episode(
     max_steps: int = MAX_STEPS,
     verbose: bool = True,
 ) -> Dict[str, Any]:
-    env = DataPipelineEnv(task_id=task_id)
-    
-    history:     List[Dict[str, str]] = []
-    rewards:     List[float]          = []
-    steps_taken: int                  = 0
-    score:       float                = 0.0
-    success:     bool                 = False
-    n_passed:    int                  = 0
-    n_total:     int                  = 0
-    pipeline_passed: bool             = False
+    env = DataPipelineEnv(task_id=task_id, max_steps=max_steps)
+    obs = env.reset()
 
-    log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
+    conversation_history: List[Dict[str, str]] = []
+    total_reward: float = 0.0
+    steps_taken: int    = 0
 
-    try:
-        obs = env.reset()
+    if verbose:
+        print(f"\n{'='*60}")
+        print(f"TASK: {task_id.upper()}")
+        print(f"{'='*60}")
+        print(f"Description: {obs.description}")
+        n_fail = len(obs.failed_assertions)
+        print(f"Initial failing assertions: {n_fail}")
 
-        if verbose:
-            print(f"\n{'='*60}", file=sys.stderr)
-            print(f"TASK: {task_id.upper()}", file=sys.stderr)
-            print(f"{'='*60}", file=sys.stderr)
-            print(f"Description: {obs.description}", file=sys.stderr)
-            n_fail = len(obs.failed_assertions)
-            print(f"Initial failing assertions: {n_fail}", file=sys.stderr)
-
-        for step in range(1, max_steps + 1):
-            if obs.pipeline_passed:
-                if verbose:
-                    print(f"\n[PASSED] Pipeline passed at step {step - 1}!", file=sys.stderr)
-                break
-
-            user_prompt = build_user_prompt(obs, step)
-            history.append({"role": "user", "content": user_prompt})
-            messages = [
-                {"role": "system", "content": SYSTEM_PROMPT},
-            ] + history
-
-            try:
-                completion = client.chat.completions.create(
-                    model=MODEL_NAME,
-                    messages=messages,
-                    temperature=TEMPERATURE,
-                    max_tokens=MAX_TOKENS,
-                    stream=False,
-                )
-                response_text = completion.choices[0].message.content or ""
-            except Exception as exc:
-                if verbose:
-                    print(f"  [Step {step}] API error: {exc}. Using fallback.", file=sys.stderr, flush=True)
-                response_text = ""
-
-            action = parse_llm_response(response_text)
-
-            # Smart fallback: if model returned empty/garbage and action is run_pipeline,
-            # convert the wasted step into a diagnostic compare_schema instead
-            if action.action_type == "run_pipeline" and not response_text.strip():
-                if obs.failed_assertions:
-                    target_table = obs.failed_assertions[0].table
-                    action = PipelineAction(
-                        action_type="compare_schema",
-                        params={"table": target_table}
-                    )
-            
-            history.append({"role": "assistant", "content": response_text or "{}"})
-            # Keep history bounded to last 20 messages to avoid token limit
-            if len(history) > 20:
-                history = history[-20:]
-
-            result = env.step(action)
-            obs    = result.observation
-            reward = result.reward or 0.0
-            done   = result.done
-            error: Optional[str] = getattr(obs, "last_action_error", None) or None
-
-            rewards.append(reward)
-            steps_taken = step
-
-            log_step(
-                step=step,
-                action=json.dumps(action.model_dump()).replace("\n", " ")[:200],
-                reward=reward,
-                done=done,
-                error=error,
-            )
-
+    for step in range(1, max_steps + 1):
+        if obs.pipeline_passed:
             if verbose:
-                print(f"\n[Step {step}] Raw response: {response_text[:120]}", file=sys.stderr)
-                print(f"[Step {step}] Action: {action.action_type}({action.params})", file=sys.stderr)
-                print(f"  Reward: {reward:+.2f} | "
-                      f"Passed: {len(obs.passed_assertions)}/{len(obs.failed_assertions)+len(obs.passed_assertions)} | "
-                      f"Result: {obs.last_action_result[:80]}", file=sys.stderr)
+                print(f"\n[PASSED] Pipeline passed at step {step - 1}!")
+            break
 
-            if done:
-                break
+        user_prompt = build_user_prompt(obs, step)
+        conversation_history.append({"role": "user", "content": user_prompt})
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+        ] + conversation_history
 
-        # Final score: fraction of assertions passing
-        n_total  = len(obs.failed_assertions) + len(obs.passed_assertions)
-        n_passed = len(obs.passed_assertions)
-        pipeline_passed = obs.pipeline_passed
-        raw_score = n_passed / n_total if n_total > 0 else 0.0
-        score = min(max(raw_score, 0.01), 0.99)
-        success = score >= SUCCESS_SCORE_THRESHOLD
+        try:
+            completion = client.chat.completions.create(
+                model=MODEL_NAME,
+                messages=messages,
+                temperature=TEMPERATURE,
+                max_tokens=MAX_TOKENS,
+                stream=False,
+            )
+            response_text = completion.choices[0].message.content or ""
+        except Exception as exc:
+            if verbose:
+                print(f"  [Step {step}] API error: {exc}. Using fallback.")
+            response_text = ""
+
+        action = parse_llm_response(response_text)
+
+        # Smart fallback: if model returned empty/garbage and action is run_pipeline,
+        # convert the wasted step into a diagnostic compare_schema instead
+        if action.action_type == "run_pipeline" and not response_text.strip():
+            if obs.failed_assertions:
+                target_table = obs.failed_assertions[0].table
+                action = PipelineAction(
+                    action_type="compare_schema",
+                    params={"table": target_table}
+                )
+        
+        conversation_history.append({"role": "assistant", "content": response_text or "{}"})
+        # Keep history bounded to last 20 messages to avoid token limit
+        if len(conversation_history) > 20:
+            conversation_history = conversation_history[-20:]
 
         if verbose:
-            print(f"\n--- Episode Summary ---", file=sys.stderr)
-            print(f"  Score (assertion pass rate): {score:.2f}", file=sys.stderr)
-            print(f"  Total reward:                {sum(rewards):.2f}", file=sys.stderr)
-            print(f"  Steps taken:                 {steps_taken}", file=sys.stderr)
-            print(f"  Pipeline passed:             {pipeline_passed}", file=sys.stderr)
+            print(f"\n[Step {step}] Raw response: {response_text[:120]}")
+            print(f"[Step {step}] Action: {action.action_type}({action.params})")
 
-    except Exception as exc:
-        print(f"[DEBUG] Episode error task={task_id}: {exc}", file=sys.stderr, flush=True)
+        result = env.step(action)
+        obs    = result.observation
+        total_reward += result.reward
+        steps_taken   = step
 
-    finally:
-        try:
-            env.close()
-        except AttributeError:
-            pass
-        except Exception as e:
-            print(f"[DEBUG] env.close() error: {e}", file=sys.stderr, flush=True)
+        if verbose:
+            print(f"  Reward: {result.reward:+.2f} | "
+                  f"Passed: {len(obs.passed_assertions)}/{len(obs.failed_assertions)+len(obs.passed_assertions)} | "
+                  f"Result: {obs.last_action_result[:80]}")
 
-        log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
+        if result.done:
+            break
+
+    # Final score: fraction of assertions passing
+    n_total  = len(obs.failed_assertions) + len(obs.passed_assertions)
+    n_passed = len(obs.passed_assertions)
+    score    = n_passed / n_total if n_total > 0 else 0.0
+
+    if verbose:
+        print(f"\n--- Episode Summary ---")
+        print(f"  Score (assertion pass rate): {score:.2f}")
+        print(f"  Total reward:                {total_reward:.2f}")
+        print(f"  Steps taken:                 {steps_taken}")
+        print(f"  Pipeline passed:             {obs.pipeline_passed}")
 
     return {
         "task_id":        task_id,
         "score":          round(score, 4),
-        "success":        success,
-        "pipeline_passed": pipeline_passed,
-        "total_reward":   round(sum(rewards), 4),
+        "pipeline_passed": obs.pipeline_passed,
+        "total_reward":   round(total_reward, 4),
         "steps_taken":    steps_taken,
         "assertions_passed": n_passed,
         "assertions_total":  n_total,
@@ -605,33 +474,21 @@ def main():
         )
         all_results.append(result)
 
-    print("\n" + "="*60, file=sys.stderr)
-    print("FINAL SCORES", file=sys.stderr)
-    print("="*60, file=sys.stderr)
+    print("\n" + "="*60)
+    print("FINAL SCORES")
+    print("="*60)
     total_score = 0.0
     for r in all_results:
         status = "[PASSED]" if r["pipeline_passed"] else "[FAILED]"
         print(f"  {r['task_id']:8s} | score={r['score']:.2f} | "
-              f"reward={r['total_reward']:+.2f} | steps={r['steps_taken']:2d} | {status}", file=sys.stderr)
+              f"reward={r['total_reward']:+.2f} | steps={r['steps_taken']:2d} | {status}")
         total_score += r["score"]
 
     avg = total_score / len(all_results) if all_results else 0.0
-    print(f"\n  Average score: {avg:.4f}", file=sys.stderr)
+    print(f"\n  Average score: {avg:.4f}")
 
-    # Summary to stderr — keeps stdout clean for the spec parser
-    import re
-    json_str = json.dumps(all_results, indent=2)
-    json_str = re.sub(
-        r'"total_reward":\s*(-?\d+(?:\.\d+)?)',
-        lambda m: f'"total_reward": {float(m.group(1)):.2f}',
-        json_str,
-    )
-    json_str = re.sub(
-        r'"score":\s*(-?\d+(?:\.\d+)?)',
-        lambda m: f'"score": {float(m.group(1)):.2f}',
-        json_str,
-    )
-    print("\nJSON_RESULTS:", json_str, file=sys.stderr)
+    # Machine-readable output for automated scoring
+    print("\nJSON_RESULTS:", json.dumps(all_results, indent=2))
 
 
 if __name__ == "__main__":

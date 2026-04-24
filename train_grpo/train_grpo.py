@@ -5,7 +5,7 @@ Model-agnostic CLI script. Works with any Hugging Face causal LM.
 
 Usage:
   python train_grpo.py
-  python train_grpo.py --model Qwen/Qwen2.5-3B-Instruct --lora-rank 32
+  python train_grpo.py --model Qwen/Qwen2.5-1.5B-Instruct --lora-rank 32
   python train_grpo.py --skip-sft --grpo-only
   python train_grpo.py --model meta-llama/Llama-3.1-8B-Instruct --push-to-hub my-org/my-model
 """
@@ -95,7 +95,7 @@ def format_obs_for_training(obs: PipelineObservation, step: int) -> str:
         + (f" | patches: {n.applied_patches}" if n.applied_patches else "")
         for n in obs.dag_structure
     )
-    hist = "\n".join(f"  {r.date}: {r.status} ({r.row_count} rows)" for r in obs.historical_runs)
+    hist = "\n".join(f"  {r.date}: {r.status} ({r.row_count} rows)" for r in obs.historical_runs[-2:])
     schema = ""
     if obs.current_schema:
         schema += "\nCURRENT SCHEMA: " + json.dumps(obs.current_schema)
@@ -129,7 +129,7 @@ def collect_gold_trajectories(task_ids: List[str], n_episodes: int = 10) -> List
         if not gold:
             continue
         for _ in range(n_episodes):
-            env = DataPipelineEnv(task_id=task_id)
+            env = DataPipelineEnv(task_id=task_id, max_steps=max_steps)
             obs = env.reset()
             for step_idx, action_dict in enumerate(gold, 1):
                 obs_text = format_obs_for_training(obs, step_idx)
@@ -213,7 +213,7 @@ def pipeline_reward_fn(completions, prompts=None, **kwargs) -> list:
 
 def run_eval_episode(model, tokenizer, task_id: str, max_steps: int = 20) -> dict:
     """Run a single evaluation episode and return score metrics."""
-    env = DataPipelineEnv(task_id=task_id)
+    env = DataPipelineEnv(task_id=task_id, max_steps=max_steps)
     obs = env.reset()
     rewards = []
     step = 0
@@ -389,7 +389,7 @@ def main():
     grpo_prompts = []
     for task_id in valid_grpo:
         for _ in range(25):
-            env = DataPipelineEnv(task_id=task_id)
+            env = DataPipelineEnv(task_id=task_id, max_steps=max_steps)
             obs = env.reset()
             prompt_text = format_obs_for_training(obs, step=1)
             chat_prompt = tokenizer.apply_chat_template(
