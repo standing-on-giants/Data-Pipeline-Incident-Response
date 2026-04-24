@@ -1,4 +1,4 @@
-import os, sys, json, textwrap, re, torch
+import os, sys, json, textwrap, re, torch, argparse
 from typing import Any, Dict, List, Optional
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import PeftModel
@@ -449,68 +449,87 @@ def collect_results(model_name: str, model_type: str, model, tokenizer, tasks: l
     return results
 
 def main():
-    tasks = [t for t in ['easy', 'medium', 'hard', 'hard2'] if t in _AVAILABLE_TASKS]
+    parser = argparse.ArgumentParser(description="Run Qwen data pipeline baseline/SFT/GRPO evaluations.")
+    parser.add_argument('--models', type=str, nargs='+', choices=['base', 'sft', 'grpo', 'all'],
+                        default=['all'], help="Which mode(s) to evaluate (base, sft, grpo, all). Space separated.")
+    parser.add_argument('--tasks', type=str, nargs='+', choices=['easy', 'medium', 'hard', 'hard2', 'all'],
+                        default=['all'], help="Which task(s) to run.")
+    args = parser.parse_args()
+
+    if 'all' in args.models:
+        run_models = ['base', 'sft', 'grpo']
+    else:
+        run_models = args.models
+
+    if 'all' in args.tasks:
+        tasks = [t for t in ['easy', 'medium', 'hard', 'hard2'] if t in _AVAILABLE_TASKS]
+    else:
+        tasks = [t for t in args.tasks if t in _AVAILABLE_TASKS]
+
     all_reports = {}
-
     token_kwargs = {'token': HF_TOKEN} if HF_TOKEN else {}
+    requires_base = ('base' in run_models) or ('sft' in run_models)
 
-    print(f"[LOAD] Loading Base Model ({BASE_MODEL_ID}) in 16-bit...")
-    # NOTE: The Kaggle script used torch.float16, matching user request to not use 4bit here
-    tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL_ID, **token_kwargs)
-    base_model = AutoModelForCausalLM.from_pretrained(
-        BASE_MODEL_ID, 
-        device_map='auto', 
-        torch_dtype=torch.float16,
-        **token_kwargs
-    )
-    base_model.eval()
-    
-    # 1. Base Model Eval
-    res_base = collect_results(BASE_MODEL_ID, "BASE", base_model, tokenizer, tasks)
-    all_reports['BASE'] = res_base
+    if requires_base:
+        print(f"[LOAD] Loading Base Model ({BASE_MODEL_ID}) in 16-bit...")
+        # NOTE: The Kaggle script used torch.float16, matching user request to not use 4bit here
+        tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL_ID, **token_kwargs)
+        base_model = AutoModelForCausalLM.from_pretrained(
+            BASE_MODEL_ID, 
+            device_map='auto', 
+            torch_dtype=torch.float16,
+            **token_kwargs
+        )
+        base_model.eval()
+        
+        # 1. Base Model Eval
+        if 'base' in run_models:
+            all_reports['BASE'] = collect_results(BASE_MODEL_ID, "BASE", base_model, tokenizer, tasks)
 
-    # 2. SFT Model Eval (Optional)
-    if os.path.exists(SFT_DIR):
-        print(f"[LOAD] Loading SFT Adapter from {SFT_DIR}...")
-        sft_model = PeftModel.from_pretrained(base_model, SFT_DIR)
-        sft_model.eval()
-        res_sft = collect_results("Qwen SFT", "SFT", sft_model, tokenizer, tasks)
-        all_reports['SFT'] = res_sft
-        sft_model.unload()  # Remove adapter to load GRPO
+        # 2. SFT Model Eval (Optional)
+        if 'sft' in run_models and os.path.exists(SFT_DIR):
+            print(f"[LOAD] Loading SFT Adapter from {SFT_DIR}...")
+            sft_model = PeftModel.from_pretrained(base_model, SFT_DIR)
+            sft_model.eval()
+            all_reports['SFT'] = collect_results("Qwen SFT", "SFT", sft_model, tokenizer, tasks)
+            sft_model.unload()  # Remove adapter to load GRPO
 
-    # Unload base model to ensure enough VRAM for fully-merged models
-    import gc
-    del base_model
-    torch.cuda.empty_cache()
-    gc.collect()
+        # Unload base model to ensure enough VRAM for fully-merged models
+        import gc
+        del base_model
+        torch.cuda.empty_cache()
+        gc.collect()
 
     # 3. GRPO Model Eval (Optional)
-    grpo_model = None
-    try:
-        print(f"[LOAD] Trying to load GRPO Fully-Merged from HF ({HF_REPO})...")
-        grpo_model = AutoModelForCausalLM.from_pretrained(HF_REPO, device_map='auto', torch_dtype=torch.float16, **token_kwargs)
-    except Exception as e:
-        print(f"       HF load failed: {e}")
+    if 'grpo' in run_models:
+        if not requires_base:
+            tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL_ID, **token_kwargs)
+        grpo_model = None
         try:
-            print(f"[LOAD] Trying to load fully-merged local model from {LOCAL_MERGED_DIR}...")
-            grpo_model = AutoModelForCausalLM.from_pretrained(LOCAL_MERGED_DIR, device_map='auto', torch_dtype=torch.float16, **token_kwargs)
-        except Exception as e2:
-            print(f"       Local fully-merged load failed: {e2}")
-            if os.path.exists(GRPO_DIR):
-                print(f"[LOAD] Falling back to GRPO Adapter {GRPO_DIR}...")
-                base_m = AutoModelForCausalLM.from_pretrained(BASE_MODEL_ID, device_map='auto', torch_dtype=torch.float16, **token_kwargs)
-                grpo_model = PeftModel.from_pretrained(base_m, GRPO_DIR)
-            
-    if grpo_model is not None:
-        grpo_model.eval()
-        res_grpo = collect_results("Qwen GRPO", "GRPO", grpo_model, tokenizer, tasks)
-        all_reports['GRPO'] = res_grpo
-        if hasattr(grpo_model, 'unload'):
-            grpo_model.unload()
-        else:
-            del grpo_model
-            torch.cuda.empty_cache()
-            gc.collect()
+            print(f"[LOAD] Trying to load GRPO Fully-Merged from HF ({HF_REPO})...")
+            grpo_model = AutoModelForCausalLM.from_pretrained(HF_REPO, device_map='auto', torch_dtype=torch.float16, **token_kwargs)
+        except Exception as e:
+            print(f"       HF load failed: {e}")
+            try:
+                print(f"[LOAD] Trying to load fully-merged local model from {LOCAL_MERGED_DIR}...")
+                grpo_model = AutoModelForCausalLM.from_pretrained(LOCAL_MERGED_DIR, device_map='auto', torch_dtype=torch.float16, **token_kwargs)
+            except Exception as e2:
+                print(f"       Local fully-merged load failed: {e2}")
+                if os.path.exists(GRPO_DIR):
+                    print(f"[LOAD] Falling back to GRPO Adapter {GRPO_DIR}...")
+                    base_m = AutoModelForCausalLM.from_pretrained(BASE_MODEL_ID, device_map='auto', torch_dtype=torch.float16, **token_kwargs)
+                    grpo_model = PeftModel.from_pretrained(base_m, GRPO_DIR)
+                
+        if grpo_model is not None:
+            grpo_model.eval()
+            all_reports['GRPO'] = collect_results("Qwen GRPO", "GRPO", grpo_model, tokenizer, tasks)
+            if hasattr(grpo_model, 'unload'):
+                grpo_model.unload()
+            else:
+                del grpo_model
+                torch.cuda.empty_cache()
+                import gc
+                gc.collect()
 
     # Final Comparison Report
     print("\\n" + "="*80)
