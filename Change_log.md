@@ -132,3 +132,7 @@
 - GAP-005: HuggingFace Space deployment and POST /reset HTTP 200 not yet verified.
 - GAP-006: openenv validate not yet run on openenv.yaml.
 
+
+### NEW: inference_comparison_qwen.py
+- Created a standalone Python script to evaluate base, sft, and grpo Qwen models natively using transformers + peft.
+- Uses the exact SYSTEM_PROMPT and formatting from the Kaggle runner to ensure apple-to-apple comparison.
