@@ -42,9 +42,18 @@ Meta PyTorch OpenEnv Hackathon — Round 2 Grand Finale
 - README.md CREATED: full submission README with obs/action spaces, task specs, reward model, setup.
 - 3 GRPO Training Variants Implemented:
   1. `train_grpo.py` / `train_grpo_general.ipynb`: General Model-Agnostic CLI script and notebook (works with any HF model).
-  2. `training_grpo_qwen.ipynb`: Optimized for Qwen2.5-3B-Instruct (4-bit, LoRA r=32, `<think>` tag stripping) on Kaggle T4.
+  2. `training_grpo_qwen.ipynb`: Optimized for Qwen2.5-1.5B-Instruct (4-bit, LoRA r=32, `<think>` tag stripping) on Kaggle T4.
   3. `training_grpo.ipynb`: LLaMA 8B notebook upgraded with Gemini API trajectory collector and loop penalty.
   - All 3 scripts include: SFT stage, GRPO stage with shaped environment reward (format bonus, drift bonus, loop penalty), reward curve plotting, evaluation comparison table, and Hugging Face Hub push logic.
+
+### Completed on 2026-04-24 (Session 2 — Final Bug Sweep)
+- **3 silent environment bugs fixed** in `src/environment.py`:
+  - `mark_acceptable` now actually overrides failing assertions to `passed=True` in `_run_all_assertions`. Reward corrected to `+0.1` (was `-1.0`).
+  - `add_data_filter` now validates SQL operator syntax. Unsupported operators (e.g. `==`) return `-0.1` and a clear error message instead of silently doing nothing.
+  - `read_data_sample` now rejects filter requests on non-existent columns with `-0.1` instead of silently returning unfiltered data.
+- **NEW**: `run_on_kaggle/run_on_kaggle_qwen_1.5b.ipynb` — clean text-only Qwen2.5-1.5B-Instruct notebook for Kaggle T4. `MAX_STEPS=100`, `MAX_TOKENS=1024`. VRAM: ~2.4 GB.
+- **All 6 Kaggle notebooks patched**: `importlib` module cache flush in clone cell + defensive `try/except TypeError` around env creation.
+- Model default updated: `Qwen/Qwen2.5-3B-Instruct` → `Qwen/Qwen2.5-1.5B-Instruct` across training scripts.
 
 ### Still Open (must complete before submission day)
 - GAP-004: Mini blog or 2-minute video (HuggingFace or YouTube).
