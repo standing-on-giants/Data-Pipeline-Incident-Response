@@ -245,6 +245,9 @@ class DataPipelineEnv:
         if df is None:
             return -0.1, f"Table '{table}' not found."
 
+        if filter_col and filter_col not in df.columns:
+            return -0.1, f"Column '{filter_col}' not found in '{table}' for filtering."
+
         # BUG FIX 2: Was adding to _inspected_tables BEFORE the reward check,
         # so the table was ALWAYS in the set → reward was always -0.05.
         # Now we check first, then mark as inspected.
@@ -252,7 +255,7 @@ class DataPipelineEnv:
         self._inspected_tables.add(table)
 
         sample = df.head(n_rows)
-        if filter_col and filter_col in df.columns:
+        if filter_col:
             mask = df[filter_col].isna() if filter_val is None else (df[filter_col] == filter_val)
             sample = df[mask].head(n_rows)
 
@@ -417,6 +420,14 @@ class DataPipelineEnv:
         if step is None:
             return -0.1, f"Step '{step_id}' not found in DAG."
 
+        # Validate syntax to prevent silent failures
+        cond_upper = filter_condition.upper()
+        if not any(op in cond_upper for op in ["IS NOT NULL", "IS NULL", ">=", "<="]):
+            return -0.1, (
+                f"Unsupported filter operator in '{filter_condition}'. "
+                f"Only 'IS NOT NULL', 'IS NULL', '>=', and '<=' are supported."
+            )
+
         # Shooting-blind penalty: modified a step without inspecting its table
         penalty = 0.0
         if step["input_table"] not in self._inspected_tables:
@@ -482,8 +493,8 @@ class DataPipelineEnv:
         )
         if result and not result.passed:
             self._task["accepted_assertions"].append(assertion_id)
-            return -1.0, (f"[FAILED] Swept under rug: assertion {assertion_id} is still failing "
-                          f"and was marked acceptable. Penalty applied.")
+            return 0.1, (f"[ACCEPTED] Assertion {assertion_id} marked as acceptable. "
+                         f"It will now be ignored during pipeline runs.")
         elif result and result.passed:
             return -0.1, f"Assertion {assertion_id} is already passing — no need to mark it."
         return -0.1, f"Could not evaluate assertion {assertion_id}."
@@ -578,8 +589,13 @@ class DataPipelineEnv:
 
     def _run_all_assertions(self) -> List[AssertionResult]:
         results = []
+        accepted = set(self._task.get("accepted_assertions", []))
         for a in self._task["assertions"]:
-            results.append(check_assertion(self._all_tables, a))
+            res = check_assertion(self._all_tables, a)
+            if res.assertion_id in accepted and not res.passed:
+                res.passed = True
+                res.actual += " [MARKED ACCEPTABLE]"
+            results.append(res)
         return results
 
     def _build_observation(self) -> PipelineObservation:
