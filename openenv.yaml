@@ -49,6 +49,16 @@ tasks:
     max_steps: 20
     n_assertions: 8
 
+  - id: hard2
+    description: >
+      Round 2 variant of the hard Meta Ads task with dynamic schema drift
+      between pipeline runs. After initial fixes, upstream APIs mutate
+      payload contracts (column renames, auth format changes, tighter
+      rate limits). Agent must detect drift mid-episode and adapt.
+    difficulty: hard
+    max_steps: 30
+    n_assertions: 8
+
 observation_space:
   type: structured
   fields:
@@ -81,6 +91,7 @@ action_space:
     - patch_transformation
     - backfill_partition
     - alert_upstream_team
+    - handle_drift
     - mark_acceptable
     - run_pipeline
 

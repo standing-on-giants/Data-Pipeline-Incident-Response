@@ -156,6 +156,17 @@ for credit assignment in a 20-step episode.
 
 ---
 
+### D-012 · Anti-repetition loop breaker in Qwen Kaggle notebook
+**Date:** 2026-04-24
+**Decision:** Added `_detect_stuck_loop()` and `_get_unstuck_action()` to the Qwen notebook runner. When the model repeats the same action 3+ times consecutively, the system overrides it with a heuristically chosen action and trims conversation history to 4 turns.
+**Rationale:**
+- Smaller models (Qwen 3B) get trapped in action loops (e.g. `coalesce unit_price` → `run_pipeline` → repeat) because the accumulated history reinforces the pattern.
+- Trimming history breaks the learned loop by removing the repetitive context the model conditions on.
+- The heuristic fallback (`dedup` for medium, `read_data_sample` for run_pipeline loops) is derived from the gold fix actions for each task, so it nudges toward the correct solution.
+**Tradeoff:** Hard-coded heuristics reduce generality. Acceptable for a 3B model that lacks the reasoning to self-correct; larger models (8B+) with proper instruction following do not trigger the loop detector.
+
+---
+
 ## Template for New Entries
 
 ### D-XXX - Short title

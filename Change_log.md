@@ -76,6 +76,21 @@
 - Schema drift demo cell: shows base model hallucinating old column name vs. trained model calling compare_schema first.
 - Hub push cell: pushes merged 16-bit model to HuggingFace Hub.
 
+### FIX: run_on_kaggle_qwen_new.ipynb — OpenEnv compliance and anti-repetition
+- Fixed hard2 crash: runner now dynamically detects available tasks from `src.tasks.TASKS`
+  instead of hardcoding `['easy', 'medium', 'hard', 'hard2']`. Skips missing tasks gracefully.
+- Added anti-repetition loop breaker (`_detect_stuck_loop` + `_get_unstuck_action`):
+  - Detects when model repeats the same action 3+ consecutive times.
+  - Forces a different action (dedup for medium, read_data_sample if stuck on run_pipeline).
+  - Trims history to 4 turns to break the learned repetition pattern.
+- Removed stale `getattr(obs, 'last_action_error')` — field does not exist in PipelineObservation model.
+- Tightened OOM history trim from 8 to 6 turns (Qwen VL uses more VRAM per token).
+- Tightened max history from 16 to 14 turns for same reason.
+
+### FIX: openenv.yaml — handle_drift and hard2
+- Added `handle_drift` to `action_space.actions` (was missing since Round 2 added it natively).
+- Added `hard2` task definition with `max_steps: 30` and `n_assertions: 8`.
+
 ### REMAINING GAPS (still open before submission)
 - GAP-004: Mini blog or 2-minute video not yet recorded.
 - GAP-005: HuggingFace Space deployment and POST /reset HTTP 200 not yet verified.
