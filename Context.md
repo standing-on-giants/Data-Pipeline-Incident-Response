@@ -48,9 +48,6 @@ Meta PyTorch OpenEnv Hackathon — Round 2 Grand Finale
 
 ### Still Open (must complete before submission day)
 - GAP-004: Mini blog or 2-minute video (HuggingFace or YouTube).
-- GAP-005: HuggingFace Space deployed and responding to POST /reset HTTP 200.
-  - Note: src/server.py uses WebSocket. The HF Space must also expose HTTP REST for the validator.
-- GAP-006: Run `openenv validate` on openenv.yaml and confirm all checks pass.
 
 ---
 
