@@ -299,7 +299,7 @@ def build_prompt(obs, step: int) -> str:
         for n in obs.dag_structure
     )
     hist    = '\\n'.join(f'  {r.date}: {r.status} ({r.row_count} rows)' for r in obs.historical_runs[-2:])
-    actions = '\\n'.join(f'  {a}' for a in obs.actions_taken[-5:]) or '  (none)'
+    actions = '\\n'.join(f'  {a}' for a in obs.actions_taken[-20:]) or '  (none)'
     sample = ''
     if obs.data_sample:
         rows      = obs.data_sample[:4]
