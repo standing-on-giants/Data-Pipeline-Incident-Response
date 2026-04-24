@@ -69,6 +69,12 @@ class DataPipelineEnv:
         self._pipeline_run_count: int = 0
         self._applied_drift_events: Set[str] = set()
 
+        # Loop-breaking reward shaping
+        # Tracks (step_id, patch_type, column) tuples to penalize duplicate patches
+        self._applied_patches_set: Set[Tuple] = set()
+        # Tracks tables already compared/schema-checked to penalize repeats
+        self._schema_compared_tables: Set[str] = set()
+
     # ------------------------------------------------------------------ #
     # Public API
     # ------------------------------------------------------------------ #
@@ -93,6 +99,8 @@ class DataPipelineEnv:
         self._last_action_result = "Pipeline reset. Initial assertion results loaded."
         self._pipeline_run_count = 0
         self._applied_drift_events = set()
+        self._applied_patches_set  = set()
+        self._schema_compared_tables = set()
         self._task["accepted_assertions"] = []
         self._task["alerts_sent"]         = []
 
@@ -269,22 +277,38 @@ class DataPipelineEnv:
 
     def _act_check_schema(self, table: str) -> Tuple[float, str]:
         schemas = self._task.get("schemas", {})
+        # Penalise repeated schema checks on the same table
+        repeat_penalty = -0.1 if table in self._schema_compared_tables else 0.0
+        self._schema_compared_tables.add(table)
         if table in schemas:
             self._last_schema = schemas[table]["current"]
             self._inspected_tables.add(table)
-            return 0.0, f"Schema for '{table}' loaded."
+            msg = f"Schema for '{table}' loaded."
+            if repeat_penalty < 0:
+                msg += " [PENALTY]: already checked this schema."
+            return repeat_penalty, msg
         # Try to infer from raw table
         df = self._raw_tables.get(table)
         if df is not None:
             self._last_schema = {c: str(df[c].dtype) for c in df.columns}
             self._inspected_tables.add(table)
-            return 0.0, f"Inferred schema for '{table}'."
+            msg = f"Inferred schema for '{table}'."
+            if repeat_penalty < 0:
+                msg += " [PENALTY]: already checked this schema."
+            return repeat_penalty, msg
         return -0.1, f"No schema info found for '{table}'."
 
     def _act_compare_schema(self, table: str) -> Tuple[float, str]:
         schemas = self._task.get("schemas", {})
         if table not in schemas:
-            return -0.1, f"No historical schema for '{table}'."
+            # Still penalise repeats on no-schema tables
+            penalty = -0.1 if table in self._schema_compared_tables else -0.1
+            self._schema_compared_tables.add(table)
+            return penalty, f"No historical schema for '{table}'."
+
+        # Penalise repeated compare_schema on the same table
+        repeat_penalty = -0.1 if table in self._schema_compared_tables else 0.0
+        self._schema_compared_tables.add(table)
 
         cur  = schemas[table]["current"]
         hist = schemas[table]["historical"]
@@ -303,7 +327,10 @@ class DataPipelineEnv:
         self._last_hist_schema = hist
         self._last_schema_diff = diff if diff else {"info": "No schema changes detected."}
         self._inspected_tables.add(table)
-        return 0.0, f"Schema diff for '{table}' loaded. {len(diff)} change(s) detected."
+        msg = f"Schema diff for '{table}' loaded. {len(diff)} change(s) detected."
+        if repeat_penalty < 0:
+            msg += " [PENALTY]: already compared this schema."
+        return repeat_penalty, msg
 
     def _act_run_assertion(self, assertion_id: str) -> Tuple[float, str]:
         assertion = next(
@@ -446,9 +473,19 @@ class DataPipelineEnv:
         if step is None:
             return -0.1, f"Step '{step_id}' not found in DAG."
 
+        # Shooting-blind penalty
         penalty = 0.0
         if step["input_table"] not in self._inspected_tables:
             penalty = -0.5
+
+        # Duplicate patch penalty: same (step_id, patch_type, column) already applied
+        patch_key = (step_id, patch_type, column)
+        if patch_key in self._applied_patches_set:
+            dup_penalty = -0.3
+            msg = (f"Patch '{patch_type}' on column '{column}' in step '{step_id}' "
+                   f"already applied. [PENALTY]: duplicate patch.")
+            return min(penalty + dup_penalty, -0.3), msg
+        self._applied_patches_set.add(patch_key)
 
         patch = {
             "patch_type":    patch_type,
@@ -515,6 +552,11 @@ class DataPipelineEnv:
 
         reward  = len(gained) * 0.4 - len(lost) * 0.5
 
+        # Zero-progress penalty: discourage repeated run_pipeline with no effect.
+        # Only applies when no assertions were gained OR lost (pure no-op run).
+        if len(gained) == 0 and len(lost) == 0:
+            reward -= 0.15
+
         self._last_assertion_results = new_results
         self._prev_passed_ids        = new_passed_ids
 
@@ -522,6 +564,8 @@ class DataPipelineEnv:
         n_tot  = len(new_results)
         msg = (f"Pipeline re-run: {n_pass}/{n_tot} assertions passing. "
                f"+{len(gained)} gained, -{len(lost)} lost.")
+        if len(gained) == 0 and len(lost) == 0:
+            msg += " [PENALTY]: no assertions changed — apply a fix before re-running."
         if drift_messages:
             msg += " Drift events applied: " + " | ".join(drift_messages)
         return reward, msg

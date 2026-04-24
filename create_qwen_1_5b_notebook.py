@@ -146,7 +146,8 @@ TEMPERATURE = float(os.getenv('TEMPERATURE', '0.1'))
 MAX_STEPS   = int(os.getenv('MAX_STEPS', '100'))
 
 SUCCESS_SCORE_THRESHOLD = 0.1
-FALLBACK_ACTION = PipelineAction(action_type='compare_schema', params={'table': 'raw_ads_insights'})
+# Smart fallback: read data sample instead of repeating compare_schema
+FALLBACK_ACTION = PipelineAction(action_type='read_data_sample', params={'table': 'raw_ads_insights', 'n_rows': 20})
 
 
 # ── OpenEnv stdout logging ─────────────────────────────────────────────────
@@ -328,6 +329,7 @@ def run_episode(task_id: str, max_steps: int = MAX_STEPS, verbose: bool = True) 
     n_passed:        int                  = 0
     n_total:         int                  = 0
     pipeline_passed: bool                 = False
+    consecutive_errors: int               = 0
 
     log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
 
@@ -347,32 +349,52 @@ def run_episode(task_id: str, max_steps: int = MAX_STEPS, verbose: bool = True) 
             # Loop detection: trim history to break repetitive context
             if _detect_action_loop(obs.actions_taken):
                 history = history[-2:]
+                consecutive_errors = 0
+
+            # After 3 consecutive generation errors, nuke history and try fresh
+            if consecutive_errors >= 3:
+                print(f'[RESET] {consecutive_errors} consecutive errors. Clearing history.', file=sys.stderr)
+                history = []
+                torch.cuda.empty_cache()
+                consecutive_errors = 0
 
             user_prompt = build_prompt(obs, step)
+            # Hard cap on prompt length to prevent context overflow on 1.5B
+            if len(user_prompt) > MAX_PROMPT_CHARS:
+                user_prompt = user_prompt[:MAX_PROMPT_CHARS] + '\\n[TRUNCATED]\\nRespond with exactly ONE action JSON object.'
             history.append({'role': 'user', 'content': user_prompt})
+
+            # Aggressively cap history for 1.5B model
+            if len(history) > MAX_HISTORY_TURNS * 2:
+                history = history[-(MAX_HISTORY_TURNS * 2):]
+
             messages = [{'role': 'system', 'content': SYSTEM_PROMPT}] + history
 
             response_text = ''
             try:
                 response_text = _call_model(messages)
+                consecutive_errors = 0
             except torch.cuda.OutOfMemoryError:
-                print(f'[OOM] Step {step}: trimming history and retrying.', file=sys.stderr)
-                history = history[-4:]
+                consecutive_errors += 1
+                print(f'[OOM] Step {step}: trimming to 2 turns and retrying.', file=sys.stderr)
+                history = history[-2:]
                 messages = [{'role': 'system', 'content': SYSTEM_PROMPT}] + history
                 torch.cuda.empty_cache()
                 try:
                     response_text = _call_model(messages)
+                    consecutive_errors = 0
                 except Exception as e2:
-                    print(f'[OOM-RETRY-FAIL] {e2}', file=sys.stderr)
+                    print(f'[OOM-RETRY-FAIL] {type(e2).__name__}: {e2}', file=sys.stderr)
             except Exception as exc:
+                consecutive_errors += 1
                 if verbose:
-                    print(f'  [Step {step}] Generation error: {exc}', file=sys.stderr)
+                    print(f'  [Step {step}] Generation error ({type(exc).__name__}): {exc}', file=sys.stderr)
+                # Trim history on any error to reduce context pressure next step
+                history = history[-4:]
 
             action = parse_llm_response(response_text)
 
             history.append({'role': 'assistant', 'content': response_text or '{}'})
-            if len(history) > 14:
-                history = history[-14:]
 
             result = env.step(action)
             obs    = result.observation

@@ -203,6 +203,28 @@ for credit assignment in a 20-step episode.
 
 ---
 
+### D-016 · Aggressive context management for Qwen 1.5B inference
+**Date:** 2026-04-24
+**Decision:** Updated the Kaggle 1.5B notebook runner to severely limit context memory: capping history to 6 turns, truncating user prompts at 3000 chars, and auto-wiping history entirely if 3 consecutive OOMs/generation errors occur.
+**Rationale:**
+- The 1.5B model's context window can handle the prompt initially, but as the episode drags on (e.g., 90 steps), accumulating history causes silent Out of Memory errors or context degradation.
+- RL requires episodes to finish successfully or timeout gracefully, not crash on hardware constraints mid-way.
+- Wiping the history when stuck acts as a "hard reset" that allows the agent to look at the current board state fresh without dying, ensuring we get a valid RL rollout.
+**Tradeoff:** The agent loses memory of past actions when history is truncated or wiped, making it more prone to repeating actions. This is acceptable because the current state (failing assertions) usually holds enough signal to decide the next action, and completing the episode is better than an unhandled exception.
+
+---
+
+### D-017 · Reward shaping and smart fallback to break repetitive action loops
+**Date:** 2026-04-24
+**Decision:** Updated `src/environment.py` with explicit penalties for zero-progress pipeline runs (-0.15) and duplicate patches (-0.3). Also updated `create_qwen_1_5b_notebook.py` to use `read_data_sample` as the JSON-parsing fallback instead of `compare_schema`, and to reset `consecutive_errors` during loop-breaks.
+**Rationale:**
+- The 1.5B model frequently entered loops of re-running `run_pipeline` with no changes, or repeating identical patches (`coalesce` on `ctr`) endlessly. The environment gave `0.0` reward for these, offering no penalty signal.
+- The default JSON-parsing fallback (`compare_schema`) exacerbated loops because it doesn't mutate state and just repeats indefinitely. `read_data_sample` is more useful for context when parsing fails.
+- By providing explicit negative rewards for repeating actions, we enable GRPO training to penalize these cyclic paths, and by fixing the loop-breaking heuristics in the notebook runner, we force the inference rollout to escape local minima.
+**Tradeoff:** Increased state tracking inside the environment (`_applied_patches_set`). Acceptable since it's cheap to track tuples of strings in memory.
+
+---
+
 ## Template for New Entries
 
 ### D-XXX - Short title
