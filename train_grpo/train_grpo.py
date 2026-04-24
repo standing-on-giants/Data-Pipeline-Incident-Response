@@ -5,7 +5,7 @@ Model-agnostic CLI script. Works with any Hugging Face causal LM.
 
 Usage:
   python train_grpo.py
-  python train_grpo.py --model Qwen/Qwen2.5-3B-Instruct --lora-rank 32
+  python train_grpo.py --model Qwen/Qwen2.5-1.5B-Instruct --lora-rank 32
   python train_grpo.py --skip-sft --grpo-only
   python train_grpo.py --model meta-llama/Llama-3.1-8B-Instruct --push-to-hub my-org/my-model
 """
