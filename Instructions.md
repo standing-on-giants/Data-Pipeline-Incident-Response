@@ -38,12 +38,12 @@ This file is the source of rules for this workspace.
   - Kaggle T4 compatible, ~90 min total runtime.
   - Includes evaluation, reward curve plot, schema drift demo, HF Hub push.
 
-- [ ] **Deploy HuggingFace Space and verify POST /reset returns HTTP 200 (GAP-005)**
+- [x] **Deploy HuggingFace Space and verify POST /reset returns HTTP 200 (GAP-005)**
   - IMPORTANT: src/server.py uses WebSocket protocol. The HF Space must also expose
     an HTTP REST endpoint for the validator (POST /reset, POST /step, GET /health).
   - Either add a FastAPI HTTP router alongside the WebSocket, or wrap with a thin REST adapter.
 
-- [ ] **Run openenv validate and confirm all checks pass (GAP-006)**
+- [x] **Run openenv validate and confirm all checks pass (GAP-006)**
   - Command: pip install openenv-core && openenv validate
   - Fix any yaml schema errors before submission.
 
