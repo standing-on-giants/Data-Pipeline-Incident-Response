@@ -181,3 +181,7 @@
 
 ### REMAINING GAPS (still open before submission)
 - GAP-004: Mini blog or 2-minute video (HuggingFace or YouTube).
+
+### NEW: inference_comparison_qwen.py
+- Created a standalone Python script to evaluate base, sft, and grpo Qwen models natively using transformers + peft.
+- Uses the exact SYSTEM_PROMPT and formatting from the Kaggle runner to ensure apple-to-apple comparison.

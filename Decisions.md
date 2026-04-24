@@ -232,3 +232,11 @@ for credit assignment in a 20-step episode.
 **Decision:** What was decided.
 **Rationale:** Why this was the right call given the constraints.
 **Tradeoff:** What was given up or deferred.
+
+### D-014 - Standalone Qwen Comparison Script via Transformers
+**Date:** 2026-04-24
+**Decision:** Developed a Python-only comparison script for Qwen evaluating standard HuggingFace Peft adapters instead of using external serving tools like Ollama or vLLM.
+**Rationale:** Required a way to rigorously compare precisely the baseline, SFT, and GRPO checkpoint adapter delta directly on the Kaggle T4, while avoiding Unsloth installation friction for inference evaluation and avoiding VL-processor confusion for text-only pipeline runs.
+**Tradeoff:** Models are loaded sequentially and unloaded strictly to save VRAM, impacting total evaluation runtime slightly but maximizing safety on 15GB T4 constraints.
+
+---
