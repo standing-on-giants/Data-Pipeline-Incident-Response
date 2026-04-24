@@ -13,6 +13,13 @@ GRPO_DIR = '/kaggle/working/grpo_qwen'
 LOCAL_MERGED_DIR = '/kaggle/working/qwen-merged-16bit'
 HF_REPO = 'Abhinav-hf/data-pipeline-incident-qwen-grpo'
 
+try:
+    from kaggle_secrets import UserSecretsClient
+    _s = UserSecretsClient()
+    HF_TOKEN = _s.get_secret('HF_TOKEN')
+except Exception:
+    HF_TOKEN = os.getenv('HF_TOKEN')
+
 MAX_TOKENS = 512
 TEMPERATURE = 0.1
 MAX_STEPS = 25
@@ -375,13 +382,16 @@ def main():
     tasks = [t for t in ['easy', 'medium', 'hard', 'hard2'] if t in _AVAILABLE_TASKS]
     all_reports = {}
 
+    token_kwargs = {'token': HF_TOKEN} if HF_TOKEN else {}
+
     print(f"[LOAD] Loading Base Model ({BASE_MODEL_ID}) in 16-bit...")
     # NOTE: The Kaggle script used torch.float16, matching user request to not use 4bit here
-    tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL_ID)
+    tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL_ID, **token_kwargs)
     base_model = AutoModelForCausalLM.from_pretrained(
         BASE_MODEL_ID, 
         device_map='auto', 
-        torch_dtype=torch.float16
+        torch_dtype=torch.float16,
+        **token_kwargs
     )
     base_model.eval()
     
@@ -408,17 +418,17 @@ def main():
     grpo_model = None
     try:
         print(f"[LOAD] Trying to load GRPO Fully-Merged from HF ({HF_REPO})...")
-        grpo_model = AutoModelForCausalLM.from_pretrained(HF_REPO, device_map='auto', torch_dtype=torch.float16)
+        grpo_model = AutoModelForCausalLM.from_pretrained(HF_REPO, device_map='auto', torch_dtype=torch.float16, **token_kwargs)
     except Exception as e:
         print(f"       HF load failed: {e}")
         try:
             print(f"[LOAD] Trying to load fully-merged local model from {LOCAL_MERGED_DIR}...")
-            grpo_model = AutoModelForCausalLM.from_pretrained(LOCAL_MERGED_DIR, device_map='auto', torch_dtype=torch.float16)
+            grpo_model = AutoModelForCausalLM.from_pretrained(LOCAL_MERGED_DIR, device_map='auto', torch_dtype=torch.float16, **token_kwargs)
         except Exception as e2:
             print(f"       Local fully-merged load failed: {e2}")
             if os.path.exists(GRPO_DIR):
                 print(f"[LOAD] Falling back to GRPO Adapter {GRPO_DIR}...")
-                base_m = AutoModelForCausalLM.from_pretrained(BASE_MODEL_ID, device_map='auto', torch_dtype=torch.float16)
+                base_m = AutoModelForCausalLM.from_pretrained(BASE_MODEL_ID, device_map='auto', torch_dtype=torch.float16, **token_kwargs)
                 grpo_model = PeftModel.from_pretrained(base_m, GRPO_DIR)
             
     if grpo_model is not None:
