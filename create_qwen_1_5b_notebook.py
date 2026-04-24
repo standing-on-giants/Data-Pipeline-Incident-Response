@@ -156,7 +156,7 @@ def log_start(task: str, env: str, model: str) -> None:
 
 def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str]) -> None:
     error_val   = error if error else 'null'
-    action_safe = action.replace('\\n', ' ').replace('\\r', '')[:200]
+    action_safe = action.replace('\\n', ' ').replace('\\r', '')
     print(f'[STEP] step={step} action={action_safe} reward={reward:.2f} done={str(done).lower()} error={error_val}', flush=True)
 
 def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
@@ -425,7 +425,7 @@ def run_episode(task_id: str, max_steps: int = MAX_STEPS, verbose: bool = True) 
             rewards.append(reward)
             steps_taken = step
 
-            log_step(step=step, action=json.dumps(action.model_dump())[:200], reward=reward, done=done, error=error)
+            log_step(step=step, action=json.dumps(action.model_dump()), reward=reward, done=done, error=error)
 
             if verbose:
                 print(f'[Step {step}] {action.action_type}({action.params})  reward={reward:+.2f}  '
