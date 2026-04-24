@@ -75,5 +75,12 @@ This file is the source of rules for this workspace.
 ---
 *Note: We have implemented 3 training variants:*
 1. `train_grpo_general.ipynb` / `train_grpo.py` (General Model Agnostic)
-2. `training_grpo_qwen.ipynb` (Qwen2.5-3B-Instruct for Kaggle T4)
+2. `training_grpo_qwen.ipynb` (Qwen2.5-1.5B-Instruct for Kaggle T4)
 3. `training_grpo.ipynb` (Original LLaMA 8B with Gemini trajectories)
+
+---
+
+## Session 2 Fixes (2026-04-24)
+- [x] **3 silent environment logic bugs fixed** in `src/environment.py` — `mark_acceptable` override, `add_data_filter` operator validation, `read_data_sample` column guard.
+- [x] **NEW inference notebook**: `run_on_kaggle/run_on_kaggle_qwen_1.5b.ipynb` — text-only Qwen2.5-1.5B, MAX_STEPS=100, MAX_TOKENS=1024.
+- [x] **All 6 Kaggle notebooks patched**: `importlib` cache flush + defensive `try/except TypeError` env creation to fix the `max_steps` kwarg error.

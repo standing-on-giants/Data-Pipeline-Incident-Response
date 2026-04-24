@@ -170,13 +170,36 @@ for credit assignment in a 20-step episode.
 
 ### D-013 · Three-variant GRPO training architecture
 **Date:** 2026-04-24
-**Decision:** Implemented GRPO training as 3 separate scripts sharing the same reward function: (1) `train_grpo.py` general CLI, (2) `training_grpo_qwen.ipynb` for Qwen2.5-3B on Kaggle, (3) patched `training_grpo.ipynb` for LLaMA 8B with optional Gemini API trajectories.
+**Decision:** Implemented GRPO training as 3 separate scripts sharing the same reward function: (1) `train_grpo.py` general CLI, (2) `training_grpo_qwen.ipynb` for Qwen2.5-1.5B on Kaggle, (3) patched `training_grpo.ipynb` for LLaMA 8B with optional Gemini API trajectories.
 **Rationale:**
-- Different models have different VRAM profiles. Qwen 3B uses G=8 and r=32 (more samples + higher rank because the model is small). LLaMA 8B uses G=4 and r=16.
-- Chose Qwen2.5-3B (text-only) over Qwen2.5-VL-3B for training because the vision encoder adds ~7GB VRAM overhead with zero benefit for this text-only task.
+- Different models have different VRAM profiles. Qwen 1.5B uses G=8 and r=32 (more samples + higher rank because the model is small). LLaMA 8B uses G=4 and r=16.
+- Chose Qwen2.5-1.5B (text-only) over Qwen2.5-VL-3B for training because the vision encoder adds ~7GB VRAM overhead with zero benefit for this text-only task, and 1.5B is faster to fine-tune on a T4.
 - The CLI script enables non-Kaggle training (local GPUs, cloud instances) and supports any HF model via `--model`.
 - Reward function is identical across all variants: env_step_reward + format_bonus + drift_bonus + loop_penalty. This ensures trained models are comparable.
 **Tradeoff:** Three separate files to maintain. Mitigated by using the same reward function and gold trajectory definitions.
+
+---
+
+### D-014 · Downgrade inference model to Qwen2.5-1.5B-Instruct
+**Date:** 2026-04-24
+**Decision:** Replaced `Qwen/Qwen2.5-VL-3B-Instruct` (Vision-Language) with `Qwen/Qwen2.5-1.5B-Instruct` (text-only) as the default lightweight inference model for Kaggle T4 notebooks.
+**Rationale:**
+- The task is entirely text-based. The VL model's vision encoder (~0.8 GB) occupies VRAM with zero benefit.
+- 1.5B vs 3B: half the parameters, ~3x faster generation, ~0.8 GB vs ~2.5 GB VRAM at 4-bit NF4.
+- Same Qwen family, same tokenizer behavior, no compatibility issues with existing prompt/parser code.
+- Leaves 13+ GB VRAM headroom on T4 (vs 9+ GB for 3B-VL), nearly eliminating OOM risk on long episodes.
+**Tradeoff:** Smaller model capacity may produce slightly weaker reasoning. Acceptable for inference evaluation; GRPO fine-tuning on this base should recover quality.
+
+---
+
+### D-015 · Fix 3 silent environment logic bugs instead of defensive notebook wrappers
+**Date:** 2026-04-24
+**Decision:** Fixed the root-cause bugs in `src/environment.py` directly (`mark_acceptable` override, `add_data_filter` operator validation, `read_data_sample` column guard) rather than adding defensive error-catching in notebooks/inference scripts.
+**Rationale:**
+- Silent failures break RL credit assignment: if the agent gets `0.0` for a no-op action, GRPO cannot learn which actions are effective.
+- Fixing at the source makes all inference scripts, training scripts, and notebooks correct simultaneously without individual patching.
+- The `mark_acceptable` bug was especially critical: it made it literally impossible for the agent to finish an episode via acceptance (episode always timed out). Correcting the reward from `-1.0` to `+0.1` makes the action semantically correct for the first time.
+**Tradeoff:** Changing reward values is a behavioral change that could affect GRPO credit assignment for trajectories trained on the old env. Acceptable because the old values were incorrect and would have produced wrong gradient signals anyway.
 
 ---
 
