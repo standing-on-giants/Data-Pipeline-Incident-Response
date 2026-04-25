@@ -14,11 +14,6 @@ BASE_MODEL_ID  = 'Qwen/Qwen2.5-3B-Instruct'
 SFT_LORA_REPO  = 'Abhinav-hf/qwen-grpo-sft-trained-16bit'  # SFT LoRA adapter repo
 GRPO_LORA_REPO = 'Abhinav-hf/qwen-grpo-lora-adapters'       # GRPO LoRA adapter repo
 
-# â”€â”€ Local fallback paths (adapter-only, NOT merged weights) 
-# These are checked only if the HF Hub is unreachable.
-LOCAL_SFT_LORA  = '/kaggle/working/lora_adapters_sft'
-LOCAL_GRPO_LORA = '/kaggle/working/lora_adapters'
-
 # â”€â”€ Optional: load base model in 8-bit to save VRAM (~4 GB vs ~6 GB fp16) â”€â”€
 # Set USE_8BIT=True when running on T4/16 GB to avoid OOM.
 # Note: 8-bit is quantization-only; torch_dtype is NOT set alongside it.
@@ -445,20 +440,14 @@ def _load_base(hf_kwargs: dict) -> AutoModelForCausalLM:
         )
 
 
-def _load_lora_model(base, lora_repo: str, local_fallback: str, hf_kwargs: dict):
+def _load_lora_model(base, lora_repo: str, hf_kwargs: dict):
     """
     Apply LoRA adapters to the shared base model.
 
-    Loading priority:
-      1. HuggingFace Hub LoRA repo  (primary)
-      2. local_fallback directory   (adapter-only, no merged weights)
+        Loads from the HuggingFace Hub only.
 
-    Returns (peft_model, tokenizer) or (None, None) on failure.
-    hf_kwargs is used for HF Hub loads only; local dirs use local_files_only=True.
+        Returns (peft_model, tokenizer) or (None, None) on failure.
     """
-    import os
-    import gc
-
     tokenizer  = None
     peft_model = None
 
@@ -473,18 +462,6 @@ def _load_lora_model(base, lora_repo: str, local_fallback: str, hf_kwargs: dict)
         print(f"       HF Hub LoRA load failed: {exc}")
         tokenizer  = None
         peft_model = None
-
-    # --- Fallback: local adapter-only directory ---
-    if peft_model is None and local_fallback and os.path.exists(local_fallback):
-        print(f"[LOAD] LoRA fallback  <- local dir: {local_fallback}")
-        try:
-            # Local dirs: no HF Hub kwargs (no token needed)
-            tokenizer  = AutoTokenizer.from_pretrained(local_fallback, local_files_only=True)
-            peft_model = PeftModel.from_pretrained(base, local_fallback)
-        except Exception as exc:
-            print(f"       Local LoRA fallback failed: {exc}")
-            tokenizer  = None
-            peft_model = None
 
     return peft_model, tokenizer
 
@@ -601,7 +578,6 @@ def main():
             sft_model, sft_tokenizer = _load_lora_model(
                 base           = shared_base,
                 lora_repo      = SFT_LORA_REPO,
-                local_fallback = LOCAL_SFT_LORA,
                 hf_kwargs      = hf_kwargs
             )
             if sft_model is not None and sft_tokenizer is not None:
@@ -631,7 +607,6 @@ def main():
             grpo_model, grpo_tokenizer = _load_lora_model(
                 base           = shared_base,
                 lora_repo      = GRPO_LORA_REPO,
-                local_fallback = LOCAL_GRPO_LORA,
                 hf_kwargs      = hf_kwargs
             )
             if grpo_model is not None and grpo_tokenizer is not None:
