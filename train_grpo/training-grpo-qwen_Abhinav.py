@@ -153,14 +153,11 @@ def collect_gold(task_ids=['easy','medium', 'hard', 'hard2'], n_ep=10):
         if not gold: continue
         for _ in range(n_ep):
             env = DataPipelineEnv(task_id=tid)
-            obs, _ = env.reset()
+            obs = env.reset()
             for si, ad in enumerate(gold, 1):
                 pairs.append((format_obs(obs, si), json.dumps(ad)))
                 result = env.step(PipelineAction(**ad))
-                if isinstance(result, tuple):
-                    obs = result[0]
-                else:
-                    obs = result.observation
+                obs = result.observation
                 if obs.pipeline_passed: break
     return pairs
 
@@ -236,16 +233,11 @@ def pipeline_reward_fn(completions, **kwargs):
         reward = 0.3  # Syntax correctness bonus
         try:
             env = DataPipelineEnv(task_id='hard')
-            obs, _ = env.reset()
+            obs = env.reset()
             result = env.step(action)
-            if isinstance(result, tuple):
-                obs = result[0]
-                reward += result[1] or 0.0
-            else:
-                obs = result.observation
-                reward += result.reward or 0.0
+            reward += result.reward or 0.0
             if action.action_type == 'compare_schema':
-                if obs.schema_diff and len(obs.schema_diff) > 0:
+                if result.observation.schema_diff and len(result.observation.schema_diff) > 0:
                     reward += 0.3 # Schema discovery bonus
         except: 
             reward -= 0.2
@@ -259,7 +251,7 @@ grpo_prompts = []
 for tid in grpo_task_ids:
     for _ in range(25):
         env = DataPipelineEnv(task_id=tid)
-        obs, _ = env.reset()
+        obs = env.reset()
         chat = tokenizer.apply_chat_template(
             [{'role':'system','content':SYSTEM_PROMPT},
              {'role':'user','content':format_obs(obs, 1)}],
