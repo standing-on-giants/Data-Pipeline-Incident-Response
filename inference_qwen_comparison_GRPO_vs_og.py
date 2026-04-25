@@ -367,7 +367,7 @@ def run_episode(model, tokenizer, task_id: str, max_steps: int = MAX_STEPS, verb
     }
 
 def collect_results(model_name: str, model_type: str, model, tokenizer, tasks: list):
-    print(f"\\n{'='*60}\\nEvaluating Model: {model_name} [{model_type}]\\n{'='*60}")
+    print(f"\n{'='*60}\nEvaluating Model: {model_name} [{model_type}]\n{'='*60}")
     results = []
     for task_id in tasks:
         r = run_episode(model, tokenizer, task_id, max_steps=MAX_STEPS, verbose=False)
@@ -375,8 +375,11 @@ def collect_results(model_name: str, model_type: str, model, tokenizer, tasks: l
         status = '[PASSED]' if r['pipeline_passed'] else '[FAILED]'
         print(f"  {r['task_id']:8s} | score={r['score']:.2f} | reward={r['total_reward']:+.2f} | steps={r['steps_taken']:2d} | {status}")
     avg_score = sum(r['score'] for r in results) / max(1, len(results))
-    print(f"  --> Average Score: {avg_score:.4f}\\n")
-    returndef main():
+    print(f"  --> Average Score: {avg_score:.4f}\n")
+    return results
+
+def main():
+    import argparse
     parser = argparse.ArgumentParser(description="Evaluate Base vs SFT vs GRPO Qwen Models")
     parser.add_argument('--models', nargs='+', choices=['base', 'sft', 'grpo'], default=['base', 'sft'], help='Select which models to evaluate')
     args = parser.parse_args()
@@ -386,7 +389,7 @@ def collect_results(model_name: str, model_type: str, model, tokenizer, tasks: l
 
     token_kwargs = {'token': HF_TOKEN} if HF_TOKEN else {}
 
-    # Define base tokenizer
+    print(f"[LOAD] Loading Base Tokenizer ({BASE_MODEL_ID})...")
     tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL_ID, **token_kwargs)
     
     # 1. Base Model Eval
@@ -400,8 +403,7 @@ def collect_results(model_name: str, model_type: str, model, tokenizer, tasks: l
         )
         base_model.eval()
         
-        res_base = collect_results(BASE_MODEL_ID, "BASE", base_model, tokenizer, tasks)
-        all_reports['BASE'] = res_base
+        all_reports['BASE'] = collect_results(BASE_MODEL_ID, "BASE", base_model, tokenizer, tasks)
 
         import gc
         del base_model
@@ -414,8 +416,7 @@ def collect_results(model_name: str, model_type: str, model, tokenizer, tasks: l
         try:
             sft_model = AutoModelForCausalLM.from_pretrained(HF_REPO, device_map='auto', torch_dtype=torch.float16, **token_kwargs)
             sft_model.eval()
-            res_sft = collect_results("Qwen SFT", "SFT", sft_model, tokenizer, tasks)
-            all_reports['SFT'] = res_sft
+            all_reports['SFT'] = collect_results("Qwen SFT", "SFT", sft_model, tokenizer, tasks)
             
             import gc
             del sft_model
@@ -428,12 +429,11 @@ def collect_results(model_name: str, model_type: str, model, tokenizer, tasks: l
     if 'grpo' in args.models:
         grpo_model = None
         try:
-            # Modify HF_REPO_GRPO when the GRPO repo is ready. For now defaulting to HF_REPO or Local.
-            print(f"[LOAD] Trying to load GRPO Fully-Merged from HuggingFace...")
-            # We assume a future GRPO repo will exist, fallback to local
+            print(f"[LOAD] Trying to load GRPO Fully-Merged from Local ({LOCAL_MERGED_DIR})...")
             grpo_model = AutoModelForCausalLM.from_pretrained(LOCAL_MERGED_DIR, device_map='auto', torch_dtype=torch.float16, **token_kwargs)
         except Exception as e:
             print(f"       Load failed: {e}")
+            import os
             if os.path.exists(GRPO_DIR):
                 print(f"[LOAD] Falling back to GRPO Adapter {GRPO_DIR}...")
                 base_m = AutoModelForCausalLM.from_pretrained(BASE_MODEL_ID, device_map='auto', torch_dtype=torch.float16, **token_kwargs)
@@ -441,8 +441,7 @@ def collect_results(model_name: str, model_type: str, model, tokenizer, tasks: l
                 
         if grpo_model is not None:
             grpo_model.eval()
-            res_grpo = collect_results("Qwen GRPO", "GRPO", grpo_model, tokenizer, tasks)
-            all_reports['GRPO'] = res_grpo
+            all_reports['GRPO'] = collect_results("Qwen GRPO", "GRPO", grpo_model, tokenizer, tasks)
             
             import gc
             if hasattr(grpo_model, 'unload'):
@@ -452,10 +451,11 @@ def collect_results(model_name: str, model_type: str, model, tokenizer, tasks: l
                 torch.cuda.empty_cache()
                 gc.collect()
 
-    # Final Comparison Report
-    print("\\n" + "="*80)
+    print("\n" + "="*80)
     print("FINAL COMPARISON REPORT")
     print("="*80)
+    
+    # Fixed print statement here:
     print(f"{'Task':<10}{'Base Score':<15}{'SFT Score':<15}{'GRPO Score':<15}")
     print("-" * 80)
 
@@ -469,9 +469,6 @@ def collect_results(model_name: str, model_type: str, model, tokenizer, tasks: l
         g_str = f"{g_score:.2f}" if isinstance(g_score, float) else g_score
         
         print(f"{task_id:<10}{b_str:<15}{s_str:<15}{g_str:<15}")
-
-def test_imports():
-    pass
 
 if __name__ == '__main__':
     main()
