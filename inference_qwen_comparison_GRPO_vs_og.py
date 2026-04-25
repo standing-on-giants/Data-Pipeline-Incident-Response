@@ -8,15 +8,17 @@ from src.models import PipelineAction, PipelineObservation
 from src.tasks import TASKS as _AVAILABLE_TASKS
 
 BASE_MODEL_ID    = 'Qwen/Qwen2.5-3B-Instruct'
+# Local Kaggle paths (used only as last-resort fallbacks)
 SFT_DIR          = '/kaggle/working/sft_qwen'
 GRPO_DIR         = '/kaggle/working/grpo_qwen'
 LOCAL_MERGED_DIR = '/kaggle/working/qwen-merged-16bit'
-# SFT model — pushed by training_grpo_qwen_merged.py (stage 1 upload)
-SFT_HF_REPO      = 'Abhinav-hf/qwen-grpo-sft-trained-16bit'
-# GRPO model — pushed by training_grpo_qwen_merged.py (stage 2 upload)
-GRPO_HF_REPO     = 'Abhinav-hf/qwen-grpo-complete-trained-16bit'
-# Legacy alias kept for backward compat
-HF_REPO          = SFT_HF_REPO
+LOCAL_SFT_LORA   = '/kaggle/working/lora_adapters_sft'
+LOCAL_GRPO_LORA  = '/kaggle/working/lora_adapters'
+
+# LoRA adapter repos on HuggingFace Hub (lightweight — ~200 MB each vs 6 GB merged)
+# The training script saves adapters + tokenizer via model.save_pretrained() / push_to_hub()
+SFT_LORA_REPO    = 'Abhinav-hf/qwen-grpo-sft-trained-16bit'      # SFT LoRA adapter hub repo
+GRPO_LORA_REPO   = 'Abhinav-hf/qwen-grpo-complete-trained-16bit'     # GRPO LoRA adapter hub repo
 
 try:
     from kaggle_secrets import UserSecretsClient
@@ -468,8 +470,8 @@ def main():
     print(f"  Tasks         : {tasks}")
     print(f"  Max steps/ep  : {max_steps}")
     print(f"  Base model    : {BASE_MODEL_ID}")
-    print(f"  SFT model     : {SFT_HF_REPO}")
-    print(f"  GRPO model    : {GRPO_HF_REPO}")
+    print(f"  SFT model     : {SFT_LORA_REPO}")
+    print(f"  GRPO model    : {GRPO_LORA_REPO}")
     print("="*80)
 
     # ------------------------------------------------------------------ #
@@ -494,88 +496,103 @@ def main():
         print("[SKIP] Base model (not in --models)")
 
     # ------------------------------------------------------------------ #
-    # 2. SFT MODEL  (merged 16-bit, latest commit from HuggingFace Hub)   #
+    # 2. SFT MODEL                                                         #
+    #    Strategy: load base model + apply SFT LoRA adapters from HF Hub  #
+    #    merge_and_unload() merges LoRA weights into base for fast infer.  #
     # ------------------------------------------------------------------ #
     if 'sft' in run_models:
-        print(f"\n[LOAD] SFT tokenizer  <- {SFT_HF_REPO}  (latest)")
+        print(f"\n[LOAD] Base model for SFT <- {BASE_MODEL_ID}  (float16)")
         try:
-            sft_tokenizer = AutoTokenizer.from_pretrained(SFT_HF_REPO, **hf_kwargs)
-            print(f"[LOAD] SFT model      <- {SFT_HF_REPO}  (float16, latest)")
-            sft_model = AutoModelForCausalLM.from_pretrained(
-                SFT_HF_REPO,
+            # Step 1: load the raw base model
+            _sft_base = AutoModelForCausalLM.from_pretrained(
+                BASE_MODEL_ID,
                 device_map='auto',
                 torch_dtype=torch.float16,
                 **hf_kwargs
             )
+
+            # Step 2: load LoRA adapter tokenizer from HF (it was saved alongside the adapters)
+            print(f"[LOAD] SFT LoRA tokenizer <- {SFT_LORA_REPO}  (latest)")
+            sft_tokenizer = AutoTokenizer.from_pretrained(SFT_LORA_REPO, **hf_kwargs)
+
+            # Step 3: apply LoRA adapters on top of the base model
+            print(f"[LOAD] SFT LoRA adapters  <- {SFT_LORA_REPO}  (latest)")
+            sft_peft = PeftModel.from_pretrained(_sft_base, SFT_LORA_REPO, **hf_kwargs)
+
+            # Step 4: merge adapters into base weights for faster inference (no adapter overhead)
+            print("[MERGE] Merging SFT LoRA into base weights (merge_and_unload)...")
+            sft_model = sft_peft.merge_and_unload()
+            del sft_peft, _sft_base
             sft_model.eval()
+
             all_reports['SFT'] = collect_results("Qwen-SFT", "SFT", sft_model, sft_tokenizer, tasks, max_steps)
             del sft_model, sft_tokenizer
             torch.cuda.empty_cache()
             gc.collect()
         except Exception as exc:
-            print(f"[ERROR] SFT load failed: {exc}")
+            print(f"[ERROR] SFT LoRA load failed ({SFT_LORA_REPO}): {exc}")
             print("        SFT column will show SKIP in the final table.")
     else:
         print("[SKIP] SFT model (not in --models)")
 
     # ------------------------------------------------------------------ #
-    # 3. GRPO MODEL (merged 16-bit, latest commit from HuggingFace Hub)   #
-    #    Fallback chain: HF Hub -> local merged dir -> local LoRA adapter  #
+    # 3. GRPO MODEL                                                        #
+    #    Strategy: load base model + apply GRPO LoRA adapters from HF Hub #
+    #    merge_and_unload() merges LoRA weights into base for fast infer.  #
+    #    Fallback chain: HF LoRA -> local LoRA dir -> local adapter dir    #
     # ------------------------------------------------------------------ #
     if 'grpo' in run_models:
         grpo_model = None
         grpo_tokenizer = None
 
-        # --- Primary: HuggingFace Hub ---
-        print(f"\n[LOAD] GRPO tokenizer <- {GRPO_HF_REPO}  (latest)")
+        print(f"\n[LOAD] Base model for GRPO <- {BASE_MODEL_ID}  (float16)")
         try:
-            grpo_tokenizer = AutoTokenizer.from_pretrained(GRPO_HF_REPO, **hf_kwargs)
-            print(f"[LOAD] GRPO model     <- {GRPO_HF_REPO}  (float16, latest)")
-            grpo_model = AutoModelForCausalLM.from_pretrained(
-                GRPO_HF_REPO,
+            _grpo_base = AutoModelForCausalLM.from_pretrained(
+                BASE_MODEL_ID,
                 device_map='auto',
                 torch_dtype=torch.float16,
                 **hf_kwargs
             )
         except Exception as exc:
-            print(f"       HF Hub load failed: {exc}")
-            grpo_tokenizer = None
+            print(f"[ERROR] Could not load base model: {exc}")
+            _grpo_base = None
 
-        # --- Fallback 1: local fully-merged directory ---
-        if grpo_model is None and os.path.exists(LOCAL_MERGED_DIR):
-            print(f"[LOAD] GRPO fallback  <- local merged dir: {LOCAL_MERGED_DIR}")
+        if _grpo_base is not None:
+            # --- Primary: HF Hub LoRA adapters ---
             try:
-                grpo_tokenizer = AutoTokenizer.from_pretrained(LOCAL_MERGED_DIR, **token_kwargs)
-                grpo_model = AutoModelForCausalLM.from_pretrained(
-                    LOCAL_MERGED_DIR,
-                    device_map='auto',
-                    torch_dtype=torch.float16,
-                    **token_kwargs
-                )
+                print(f"[LOAD] GRPO LoRA tokenizer <- {GRPO_LORA_REPO}  (latest)")
+                grpo_tokenizer = AutoTokenizer.from_pretrained(GRPO_LORA_REPO, **hf_kwargs)
+                print(f"[LOAD] GRPO LoRA adapters  <- {GRPO_LORA_REPO}  (latest)")
+                grpo_peft = PeftModel.from_pretrained(_grpo_base, GRPO_LORA_REPO, **hf_kwargs)
+                print("[MERGE] Merging GRPO LoRA into base weights (merge_and_unload)...")
+                grpo_model = grpo_peft.merge_and_unload()
+                del grpo_peft
             except Exception as exc:
-                print(f"       Local merged load failed: {exc}")
+                print(f"       HF LoRA load failed: {exc}")
                 grpo_tokenizer = None
+                grpo_model = None
 
-        # --- Fallback 2: local LoRA adapter on top of base model ---
-        if grpo_model is None and os.path.exists(GRPO_DIR):
-            print(f"[LOAD] GRPO fallback  <- LoRA adapter: {GRPO_DIR}")
-            try:
-                grpo_tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL_ID, **token_kwargs)
-                _base = AutoModelForCausalLM.from_pretrained(
-                    BASE_MODEL_ID, device_map='auto', torch_dtype=torch.float16, **token_kwargs)
-                grpo_model = PeftModel.from_pretrained(_base, GRPO_DIR)
-            except Exception as exc:
-                print(f"       LoRA adapter load failed: {exc}")
-                grpo_tokenizer = None
+            # --- Fallback 1: local LoRA adapter directory ---
+            if grpo_model is None:
+                local_lora = LOCAL_GRPO_LORA if os.path.exists(LOCAL_GRPO_LORA) else (GRPO_DIR if os.path.exists(GRPO_DIR) else None)
+                if local_lora:
+                    print(f"[LOAD] GRPO fallback  <- local LoRA dir: {local_lora}")
+                    try:
+                        grpo_tokenizer = AutoTokenizer.from_pretrained(local_lora, **token_kwargs)
+                        grpo_peft = PeftModel.from_pretrained(_grpo_base, local_lora)
+                        grpo_model = grpo_peft.merge_and_unload()
+                        del grpo_peft
+                    except Exception as exc:
+                        print(f"       Local LoRA load failed: {exc}")
+                        grpo_tokenizer = None
+                        grpo_model = None
+
+            del _grpo_base  # base no longer needed after merge
 
         if grpo_model is not None and grpo_tokenizer is not None:
             grpo_model.eval()
             all_reports['GRPO'] = collect_results("Qwen-GRPO", "GRPO", grpo_model, grpo_tokenizer, tasks, max_steps)
-            if hasattr(grpo_model, 'unload'):
-                grpo_model.unload()
-            else:
-                del grpo_model
-            del grpo_tokenizer
+            del grpo_model, grpo_tokenizer
             torch.cuda.empty_cache()
             gc.collect()
         else:
@@ -598,7 +615,7 @@ def main():
     print("\n" + "="*80)
     print("FINAL COMPARISON REPORT")
     for flag, key, _ in active:
-        repo = BASE_MODEL_ID if flag == 'base' else (SFT_HF_REPO if flag == 'sft' else GRPO_HF_REPO)
+        repo = BASE_MODEL_ID if flag == 'base' else (SFT_LORA_REPO if flag == 'sft' else GRPO_LORA_REPO)
         print(f"  {key:<5}: {repo}")
     print("="*80)
 
