@@ -157,7 +157,10 @@ def collect_gold(task_ids=['easy','medium', 'hard', 'hard2'], n_ep=10):
             for si, ad in enumerate(gold, 1):
                 pairs.append((format_obs(obs, si), json.dumps(ad)))
                 result = env.step(PipelineAction(**ad))
-                obs = result.observation
+                if isinstance(result, tuple):
+                    obs = result[0]
+                else:
+                    obs = result.observation
                 if obs.pipeline_passed: break
     return pairs
 
@@ -235,9 +238,14 @@ def pipeline_reward_fn(completions, **kwargs):
             env = DataPipelineEnv(task_id='hard')
             obs, _ = env.reset()
             result = env.step(action)
-            reward += result.reward or 0.0
+            if isinstance(result, tuple):
+                obs = result[0]
+                reward += result[1] or 0.0
+            else:
+                obs = result.observation
+                reward += result.reward or 0.0
             if action.action_type == 'compare_schema':
-                if result.observation.schema_diff and len(result.observation.schema_diff) > 0:
+                if obs.schema_diff and len(obs.schema_diff) > 0:
                     reward += 0.3 # Schema discovery bonus
         except: 
             reward -= 0.2

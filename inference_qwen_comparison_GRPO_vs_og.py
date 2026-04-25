@@ -313,7 +313,8 @@ def run_episode(model, tokenizer, task_id: str, max_steps: int = MAX_STEPS, verb
     pipeline_passed = False
 
     try:
-        obs, _ = env.reset()
+        res = env.reset()
+        obs = res[0] if isinstance(res, tuple) else res
         for step in range(1, max_steps + 1):
             if obs.pipeline_passed: break
             user_prompt = build_user_prompt(obs, step)
@@ -339,10 +340,18 @@ def run_episode(model, tokenizer, task_id: str, max_steps: int = MAX_STEPS, verb
             if len(history) > 10: history = history[-10:]
             
             result = env.step(action)
-            obs = result.observation
-            rewards.append(result.reward or 0.0)
+            if isinstance(result, tuple):
+                obs = result[0]
+                reward = result[1]
+                done = result[2]
+            else:
+                obs = result.observation
+                reward = result.reward
+                done = result.done
+                
+            rewards.append(reward or 0.0)
             steps_taken = step
-            if result.done: break
+            if done: break
 
         n_total = len(obs.failed_assertions) + len(obs.passed_assertions)
         n_passed = len(obs.passed_assertions)
