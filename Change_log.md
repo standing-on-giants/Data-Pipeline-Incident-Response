@@ -194,6 +194,19 @@
 - Expanded `GOLD_ACTIONS` payload in Stage 1 SFT to enforce exact `hard` and `hard2` schema drift handling trajectories.
 - Doubled GRPOTrainer KL divergence (`beta=0.2`) to penalize severe deviation from SFT anchor points.
 - Fixed `BlockDiagonalCausalMask` unsloth compilation exception by injecting direct cache clearance scripts prior to transformers compilation alongside forcing rigorous fast unsloth/transformers upgrade sync.
+### 4/25/2026 - GRPO and SFT Optimizations & Fixes
+
+- Fixed: JSON serialization crash in Unsloth save by monkey-patching transformers.configuration_utils.json.dumps with a SafeEncoder that drops callable values. Patch must be applied AFTER pip install.
+- Fixed: do_sample=True removed from GRPOConfig (Unsloth doesn't support it; temperature=0.8 implicitly enables sampling).
+- Fixed: Removed fp16=True and prepare_model_for_kbit_training() calls from GRPO section — Unsloth handles precision internally for 8-bit models.
+- Fixed: load_best_model_at_end and EarlyStoppingCallback removed from SFTTrainer (incompatible with 8-bit Unsloth).
+- Fixed: save_steps=40, eval_steps=20 alignment (40 must be multiple of 20).
+- Fixed: Git pull logic was inverted (fetch running on non-existent dir). Fixed clone vs pull branching.
+- Added: Smoke test cell after model load to verify save_pretrained_merged works before wasting training time.
+- SFT: Reduced epochs 5->2, LR 2e-4->1e-4, weight_decay 0.01->0.05, added train/eval split (90/10), to prevent overfitting on 250 examples.
+- GRPO: beta increased 0.2->0.5 to control KL divergence.
+- GRPO: Observed reward collapse after step 50 — rewards trending from +0.24 average to -0.13 by step 80. Root cause: model drifts to invalid JSON, receives -0.3 floor reward every step, gradient signal dies.
+
 
 ---
 

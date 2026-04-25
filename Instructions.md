@@ -84,3 +84,13 @@ This file is the source of rules for this workspace.
 - [x] **3 silent environment logic bugs fixed** in `src/environment.py` — `mark_acceptable` override, `add_data_filter` operator validation, `read_data_sample` column guard.
 - [x] **NEW inference notebook**: `run_on_kaggle/run_on_kaggle_qwen_1.5b.ipynb` — text-only Qwen2.5-1.5B, MAX_STEPS=100, MAX_TOKENS=1024.
 - [x] **All 6 Kaggle notebooks patched**: `importlib` cache flush + defensive `try/except TypeError` env creation to fix the `max_steps` kwarg error.
+
+### GRPO and Unsloth Training Instructions
+
+- The JSON patch must always appear AFTER the pip install block and BEFORE any transformers/unsloth imports.
+- Never use do_sample in GRPOConfig with Unsloth — use temperature only.
+- Never use fp16/bf16 in GRPOConfig when model is loaded in 8-bit with Unsloth — remove those flags entirely.
+- Never call prepare_model_for_kbit_training() or gradient_checkpointing_enable() before GRPOTrainer when using Unsloth LoRA — Unsloth handles this via use_gradient_checkpointing='unsloth' in get_peft_model().
+- save_steps must always be an exact multiple of eval_steps.
+- Always run the smoke test cell before any training to catch save errors early.
+- To reload from SFT checkpoint for GRPO, use FastLanguageModel.from_pretrained(model_name=SFT_DIR, load_in_8bit=True) then re-apply get_peft_model() with the same LoRA config.
