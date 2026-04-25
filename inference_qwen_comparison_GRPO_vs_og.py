@@ -397,14 +397,14 @@ def run_episode(model, tokenizer, task_id: str, max_steps: int = MAX_STEPS, verb
         'assertions_total': n_total,
     }
 
-def collect_results(model_name: str, model_type: str, model, tokenizer, tasks: list):
+def collect_results(model_name: str, model_type: str, model, tokenizer, tasks: list, max_steps: int = MAX_STEPS):
     import time
-    print(f"\n{'='*60}\nEvaluating: {model_name} [{model_type}]  ({len(tasks)} tasks, max {MAX_STEPS} steps each)\n{'='*60}")
+    print(f"\n{'='*60}\nEvaluating: {model_name} [{model_type}]  ({len(tasks)} tasks, max {max_steps} steps each)\n{'='*60}")
     results = []
     t_start = time.time()
     for task_id in tasks:
         print(f"\n  --> Task: {task_id}")
-        r = run_episode(model, tokenizer, task_id, max_steps=MAX_STEPS, verbose=True)
+        r = run_episode(model, tokenizer, task_id, max_steps=max_steps, verbose=True)
         results.append(r)
         status = '[PASSED]' if r['pipeline_passed'] else '[FAILED]'
         elapsed = time.time() - t_start
@@ -417,8 +417,45 @@ def collect_results(model_name: str, model_type: str, model, tokenizer, tasks: l
 
 def main():
     import gc
+    import argparse
 
-    tasks = [t for t in ['easy', 'medium', 'hard', 'hard2'] if t in _AVAILABLE_TASKS]
+    parser = argparse.ArgumentParser(
+        description="Qwen 3B: Base vs SFT vs GRPO comparison",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=textwrap.dedent("""
+        Examples:
+          python inference_qwen_comparison_GRPO_vs_og.py                  # all 3 models
+          python inference_qwen_comparison_GRPO_vs_og.py --models base    # base only
+          python inference_qwen_comparison_GRPO_vs_og.py --models grpo    # grpo only
+          python inference_qwen_comparison_GRPO_vs_og.py --models sft grpo
+          python inference_qwen_comparison_GRPO_vs_og.py --models base --tasks easy medium
+        """)
+    )
+    parser.add_argument(
+        '--models', nargs='+',
+        choices=['base', 'sft', 'grpo'],
+        default=['base', 'sft', 'grpo'],
+        metavar='MODEL',
+        help='Which models to evaluate. Choices: base sft grpo  (default: all three)'
+    )
+    parser.add_argument(
+        '--tasks', nargs='+',
+        choices=['easy', 'medium', 'hard', 'hard2'],
+        default=None,
+        metavar='TASK',
+        help='Which tasks to run. Choices: easy medium hard hard2  (default: all available)'
+    )
+    parser.add_argument(
+        '--steps', type=int, default=MAX_STEPS,
+        help=f'Max steps per episode (default: {MAX_STEPS})'
+    )
+    args = parser.parse_args()
+
+    run_models = set(args.models)
+    all_tasks  = [t for t in ['easy', 'medium', 'hard', 'hard2'] if t in _AVAILABLE_TASKS]
+    tasks      = [t for t in (args.tasks or all_tasks) if t in all_tasks]
+    max_steps  = args.steps
+
     all_reports = {}
     token_kwargs = {'token': HF_TOKEN} if HF_TOKEN else {}
     # local_files_only=False forces HuggingFace to always check the Hub for the
@@ -426,141 +463,157 @@ def main():
     hf_kwargs = {**token_kwargs, 'local_files_only': False}
 
     print("="*80)
-    print("Qwen2.5-3B  |  3-Way Comparison: Base vs SFT vs GRPO")
-    print(f"  Base model : {BASE_MODEL_ID}")
-    print(f"  SFT model  : {SFT_HF_REPO}  (latest from HF Hub)")
-    print(f"  GRPO model : {GRPO_HF_REPO}  (latest from HF Hub)")
+    print("Qwen2.5-3B  |  Inference Comparison")
+    print(f"  Models to run : {sorted(run_models)}")
+    print(f"  Tasks         : {tasks}")
+    print(f"  Max steps/ep  : {max_steps}")
+    print(f"  Base model    : {BASE_MODEL_ID}")
+    print(f"  SFT model     : {SFT_HF_REPO}")
+    print(f"  GRPO model    : {GRPO_HF_REPO}")
     print("="*80)
 
     # ------------------------------------------------------------------ #
     # 1. BASE MODEL                                                        #
-    #    Loads its own tokenizer (no custom chat template).                #
     # ------------------------------------------------------------------ #
-    print(f"\n[LOAD] Base tokenizer <- {BASE_MODEL_ID}")
-    base_tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL_ID, **hf_kwargs)
-    print(f"[LOAD] Base model     <- {BASE_MODEL_ID}  (float16, latest)")
-    base_model = AutoModelForCausalLM.from_pretrained(
-        BASE_MODEL_ID,
-        device_map='auto',
-        torch_dtype=torch.float16,
-        **hf_kwargs
-    )
-    base_model.eval()
-    all_reports['BASE'] = collect_results(BASE_MODEL_ID, "BASE", base_model, base_tokenizer, tasks)
-    del base_model, base_tokenizer
-    torch.cuda.empty_cache()
-    gc.collect()
-
-    # ------------------------------------------------------------------ #
-    # 2. SFT MODEL  (merged 16-bit, latest commit from HuggingFace Hub)   #
-    #    Tokenizer from SFT repo — ships its own chat_template.jinja       #
-    #    trained with Unsloth.                                              #
-    # ------------------------------------------------------------------ #
-    print(f"\n[LOAD] SFT tokenizer  <- {SFT_HF_REPO}  (latest)")
-    try:
-        sft_tokenizer = AutoTokenizer.from_pretrained(SFT_HF_REPO, **hf_kwargs)
-        print(f"[LOAD] SFT model      <- {SFT_HF_REPO}  (float16, latest)")
-        sft_model = AutoModelForCausalLM.from_pretrained(
-            SFT_HF_REPO,
+    if 'base' in run_models:
+        print(f"\n[LOAD] Base tokenizer <- {BASE_MODEL_ID}")
+        base_tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL_ID, **hf_kwargs)
+        print(f"[LOAD] Base model     <- {BASE_MODEL_ID}  (float16, latest)")
+        base_model = AutoModelForCausalLM.from_pretrained(
+            BASE_MODEL_ID,
             device_map='auto',
             torch_dtype=torch.float16,
             **hf_kwargs
         )
-        sft_model.eval()
-        all_reports['SFT'] = collect_results("Qwen-SFT", "SFT", sft_model, sft_tokenizer, tasks)
-        del sft_model, sft_tokenizer
-        torch.cuda.empty_cache()
-        gc.collect()
-    except Exception as exc:
-        print(f"[ERROR] SFT load failed: {exc}")
-        print("        SFT column will show LOAD_ERR in the final table.")
-
-    # ------------------------------------------------------------------ #
-    # 3. GRPO MODEL (merged 16-bit, latest commit from HuggingFace Hub)   #
-    #    Tokenizer from GRPO repo — ships its own chat_template.jinja      #
-    #    trained with Unsloth.                                              #
-    #    Fallback chain: HF Hub -> local merged dir -> local LoRA adapter  #
-    # ------------------------------------------------------------------ #
-    grpo_model = None
-    grpo_tokenizer = None
-
-    # --- Primary: HuggingFace Hub (always fetches latest commit) ---
-    print(f"\n[LOAD] GRPO tokenizer <- {GRPO_HF_REPO}  (latest)")
-    try:
-        grpo_tokenizer = AutoTokenizer.from_pretrained(GRPO_HF_REPO, **hf_kwargs)
-        print(f"[LOAD] GRPO model     <- {GRPO_HF_REPO}  (float16, latest)")
-        grpo_model = AutoModelForCausalLM.from_pretrained(
-            GRPO_HF_REPO,
-            device_map='auto',
-            torch_dtype=torch.float16,
-            **hf_kwargs
-        )
-    except Exception as exc:
-        print(f"       HF Hub load failed: {exc}")
-        grpo_tokenizer = None
-
-    # --- Fallback 1: local fully-merged directory ---
-    if grpo_model is None and os.path.exists(LOCAL_MERGED_DIR):
-        print(f"[LOAD] GRPO fallback  <- local merged dir: {LOCAL_MERGED_DIR}")
-        try:
-            grpo_tokenizer = AutoTokenizer.from_pretrained(LOCAL_MERGED_DIR, **token_kwargs)
-            grpo_model = AutoModelForCausalLM.from_pretrained(
-                LOCAL_MERGED_DIR,
-                device_map='auto',
-                torch_dtype=torch.float16,
-                **token_kwargs
-            )
-        except Exception as exc:
-            print(f"       Local merged load failed: {exc}")
-            grpo_tokenizer = None
-
-    # --- Fallback 2: local LoRA adapter on top of base model ---
-    if grpo_model is None and os.path.exists(GRPO_DIR):
-        print(f"[LOAD] GRPO fallback  <- LoRA adapter: {GRPO_DIR}")
-        try:
-            grpo_tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL_ID, **token_kwargs)
-            _base = AutoModelForCausalLM.from_pretrained(
-                BASE_MODEL_ID, device_map='auto', torch_dtype=torch.float16, **token_kwargs)
-            grpo_model = PeftModel.from_pretrained(_base, GRPO_DIR)
-        except Exception as exc:
-            print(f"       LoRA adapter load failed: {exc}")
-            grpo_tokenizer = None
-
-    if grpo_model is not None and grpo_tokenizer is not None:
-        grpo_model.eval()
-        all_reports['GRPO'] = collect_results("Qwen-GRPO", "GRPO", grpo_model, grpo_tokenizer, tasks)
-        if hasattr(grpo_model, 'unload'):
-            grpo_model.unload()
-        else:
-            del grpo_model
-        del grpo_tokenizer
+        base_model.eval()
+        all_reports['BASE'] = collect_results(BASE_MODEL_ID, "BASE", base_model, base_tokenizer, tasks, max_steps)
+        del base_model, base_tokenizer
         torch.cuda.empty_cache()
         gc.collect()
     else:
-        print("[ERROR] GRPO model could not be loaded from any source.")
-        print("        GRPO column will show LOAD_ERR in the final table.")
+        print("[SKIP] Base model (not in --models)")
+
+    # ------------------------------------------------------------------ #
+    # 2. SFT MODEL  (merged 16-bit, latest commit from HuggingFace Hub)   #
+    # ------------------------------------------------------------------ #
+    if 'sft' in run_models:
+        print(f"\n[LOAD] SFT tokenizer  <- {SFT_HF_REPO}  (latest)")
+        try:
+            sft_tokenizer = AutoTokenizer.from_pretrained(SFT_HF_REPO, **hf_kwargs)
+            print(f"[LOAD] SFT model      <- {SFT_HF_REPO}  (float16, latest)")
+            sft_model = AutoModelForCausalLM.from_pretrained(
+                SFT_HF_REPO,
+                device_map='auto',
+                torch_dtype=torch.float16,
+                **hf_kwargs
+            )
+            sft_model.eval()
+            all_reports['SFT'] = collect_results("Qwen-SFT", "SFT", sft_model, sft_tokenizer, tasks, max_steps)
+            del sft_model, sft_tokenizer
+            torch.cuda.empty_cache()
+            gc.collect()
+        except Exception as exc:
+            print(f"[ERROR] SFT load failed: {exc}")
+            print("        SFT column will show SKIP in the final table.")
+    else:
+        print("[SKIP] SFT model (not in --models)")
+
+    # ------------------------------------------------------------------ #
+    # 3. GRPO MODEL (merged 16-bit, latest commit from HuggingFace Hub)   #
+    #    Fallback chain: HF Hub -> local merged dir -> local LoRA adapter  #
+    # ------------------------------------------------------------------ #
+    if 'grpo' in run_models:
+        grpo_model = None
+        grpo_tokenizer = None
+
+        # --- Primary: HuggingFace Hub ---
+        print(f"\n[LOAD] GRPO tokenizer <- {GRPO_HF_REPO}  (latest)")
+        try:
+            grpo_tokenizer = AutoTokenizer.from_pretrained(GRPO_HF_REPO, **hf_kwargs)
+            print(f"[LOAD] GRPO model     <- {GRPO_HF_REPO}  (float16, latest)")
+            grpo_model = AutoModelForCausalLM.from_pretrained(
+                GRPO_HF_REPO,
+                device_map='auto',
+                torch_dtype=torch.float16,
+                **hf_kwargs
+            )
+        except Exception as exc:
+            print(f"       HF Hub load failed: {exc}")
+            grpo_tokenizer = None
+
+        # --- Fallback 1: local fully-merged directory ---
+        if grpo_model is None and os.path.exists(LOCAL_MERGED_DIR):
+            print(f"[LOAD] GRPO fallback  <- local merged dir: {LOCAL_MERGED_DIR}")
+            try:
+                grpo_tokenizer = AutoTokenizer.from_pretrained(LOCAL_MERGED_DIR, **token_kwargs)
+                grpo_model = AutoModelForCausalLM.from_pretrained(
+                    LOCAL_MERGED_DIR,
+                    device_map='auto',
+                    torch_dtype=torch.float16,
+                    **token_kwargs
+                )
+            except Exception as exc:
+                print(f"       Local merged load failed: {exc}")
+                grpo_tokenizer = None
+
+        # --- Fallback 2: local LoRA adapter on top of base model ---
+        if grpo_model is None and os.path.exists(GRPO_DIR):
+            print(f"[LOAD] GRPO fallback  <- LoRA adapter: {GRPO_DIR}")
+            try:
+                grpo_tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL_ID, **token_kwargs)
+                _base = AutoModelForCausalLM.from_pretrained(
+                    BASE_MODEL_ID, device_map='auto', torch_dtype=torch.float16, **token_kwargs)
+                grpo_model = PeftModel.from_pretrained(_base, GRPO_DIR)
+            except Exception as exc:
+                print(f"       LoRA adapter load failed: {exc}")
+                grpo_tokenizer = None
+
+        if grpo_model is not None and grpo_tokenizer is not None:
+            grpo_model.eval()
+            all_reports['GRPO'] = collect_results("Qwen-GRPO", "GRPO", grpo_model, grpo_tokenizer, tasks, max_steps)
+            if hasattr(grpo_model, 'unload'):
+                grpo_model.unload()
+            else:
+                del grpo_model
+            del grpo_tokenizer
+            torch.cuda.empty_cache()
+            gc.collect()
+        else:
+            print("[ERROR] GRPO model could not be loaded from any source.")
+            print("        GRPO column will show SKIP in the final table.")
+    else:
+        print("[SKIP] GRPO model (not in --models)")
 
     # ------------------------------------------------------------------ #
     # FINAL COMPARISON TABLE                                               #
     # ------------------------------------------------------------------ #
+    # Only show columns for models that were actually requested + evaluated.
+    MODEL_ORDER  = [('base', 'BASE', 'Base Score'),
+                    ('sft',  'SFT',  'SFT Score'),
+                    ('grpo', 'GRPO', 'GRPO Score')]
+    active = [(flag, key, label)
+              for flag, key, label in MODEL_ORDER
+              if flag in run_models]
+
     print("\n" + "="*80)
     print("FINAL COMPARISON REPORT")
-    print(f"  Base : {BASE_MODEL_ID}")
-    print(f"  SFT  : {SFT_HF_REPO}")
-    print(f"  GRPO : {GRPO_HF_REPO}")
+    for flag, key, _ in active:
+        repo = BASE_MODEL_ID if flag == 'base' else (SFT_HF_REPO if flag == 'sft' else GRPO_HF_REPO)
+        print(f"  {key:<5}: {repo}")
     print("="*80)
 
     col_w = 15
-    print(f"{'Task':<10}{'Base Score':<{col_w}}{'SFT Score':<{col_w}}{'GRPO Score':<{col_w}}")
-    print("-" * (10 + col_w * 3))
+    header = f"{'Task':<10}" + "".join(f"{label:<{col_w}}" for _, _, label in active)
+    print(header)
+    print("-" * (10 + col_w * len(active)))
 
-    all_avg = {'BASE': 0.0, 'SFT': 0.0, 'GRPO': 0.0}
+    all_avg = {key: 0.0 for _, key, _ in active}
     for task_id in tasks:
         row = f"{task_id:<10}"
-        for key in ['BASE', 'SFT', 'GRPO']:
+        for _, key, _ in active:
             results_list = all_reports.get(key, [])
             if not results_list:
-                cell = 'LOAD_ERR'
+                cell = 'SKIP'
             else:
                 sc = next((r['score'] for r in results_list if r['task_id'] == task_id), None)
                 cell = f"{sc:.2f}" if sc is not None else 'N/A'
@@ -569,10 +622,10 @@ def main():
             row += f"{cell:<{col_w}}"
         print(row)
 
-    print("-" * (10 + col_w * 3))
+    print("-" * (10 + col_w * len(active)))
     n = max(len(tasks), 1)
     avg_row = f"{'AVG':<10}"
-    for key in ['BASE', 'SFT', 'GRPO']:
+    for _, key, _ in active:
         if all_reports.get(key):
             avg_row += f"{all_avg[key]/n:.2f}{'':<{col_w-4}}"
         else:
@@ -582,3 +635,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
