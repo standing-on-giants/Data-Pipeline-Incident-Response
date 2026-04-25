@@ -206,3 +206,36 @@
 - SFT: Reduced epochs 5->2, LR 2e-4->1e-4, weight_decay 0.01->0.05, added train/eval split (90/10), to prevent overfitting on 250 examples.
 - GRPO: beta increased 0.2->0.5 to control KL divergence.
 - GRPO: Observed reward collapse after step 50 — rewards trending from +0.24 average to -0.13 by step 80. Root cause: model drifts to invalid JSON, receives -0.3 floor reward every step, gradient signal dies.
+
+
+---
+
+## 2026-04-25 — Comparison Script Bug Fix Session
+
+### BUG REPORT: inference_qwen_comparison_GRPO_vs_og.py showed "Base vs GRPO" when "Base vs SFT" was expected
+
+**Root Cause Analysis (3 bugs found):**
+
+**Bug 1 — Wrong default `--models` argument:**
+- `default=['base', 'sft']` was set in the argparse definition, but the model that was actually trained and uploaded (`training_grpo_qwen_merged.py`) produces a **GRPO** model at `Abhinav-hf/qwen-grpo-complete-trained-16bit`, NOT an SFT-only model.
+- When `--models base grpo` was passed explicitly, SFT was excluded. When the default `base sft` was used, SFT failed to load (HF repo mismatch or missing), appearing silently as `LOAD_ERR`.
+- **Fix**: Changed default to `['base', 'grpo']` to match what `training_grpo_qwen_merged.py` actually produces.
+
+**Bug 2 — Report header always printed all 3 columns regardless of `--models`:**
+- The final comparison table always printed `Task | Base Score | SFT Score | GRPO Score` even if SFT was never evaluated. This made the output **look like a 3-way comparison** when only 2 models ran, with SFT showing `-` (confusing).
+- **Fix**: Replaced the hardcoded header and row logic with a **dynamic column system** that only shows columns for models that were actually requested via `--models`. Output now shows `Models evaluated: [...]` on a labelled line, and the table columns match exactly what ran.
+
+**Bug 3 — HF_REPO constant mismatch between training and inference scripts:**
+- `training_grpo_qwen_merged.py` uploads:
+  - SFT → `Abhinav-hf/qwen-grpo-sft-trained-16bit` (stage 1)
+  - GRPO → `Abhinav-hf/qwen-grpo-complete-trained-16bit` (stage 2)
+- The inference script only had `HF_REPO = 'Abhinav-hf/qwen-grpo-sft-trained-16bit'` (single constant, used as SFT), and **never tried to load GRPO from HF** — only from local disk at `/kaggle/working/qwen-merged-16bit`.
+- **Fix**: Added `SFT_HF_REPO` and `GRPO_HF_REPO` constants matching the actual training script upload destinations. GRPO loading now has **3 priority tiers**: local merged dir → HF Hub → local LoRA adapter.
+
+### Files changed:
+- `inference_qwen_comparison_GRPO_vs_og.py`:
+  - Added `SFT_HF_REPO` and `GRPO_HF_REPO` constants
+  - Changed `--models` default from `['base','sft']` to `['base','grpo']`
+  - Fixed SFT loading to use `SFT_HF_REPO`
+  - Fixed GRPO loading: 3-tier priority (local → HF Hub → LoRA adapter), with explicit error if all fail
+  - Fixed report table: dynamic columns, only shows evaluated models, prints `Models evaluated: [...]`

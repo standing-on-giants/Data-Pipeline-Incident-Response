@@ -1,4 +1,4 @@
-import os, sys, json, textwrap, re, torch
+import os, sys, json, textwrap, re, torch, argparse
 from typing import Any, Dict, List, Optional
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import PeftModel
@@ -7,11 +7,16 @@ from src.environment import DataPipelineEnv
 from src.models import PipelineAction, PipelineObservation
 from src.tasks import TASKS as _AVAILABLE_TASKS
 
-BASE_MODEL_ID = 'Qwen/Qwen2.5-3B-Instruct'
-SFT_DIR = '/kaggle/working/sft_qwen'
-GRPO_DIR = '/kaggle/working/grpo_qwen'
+BASE_MODEL_ID    = 'Qwen/Qwen2.5-3B-Instruct'
+SFT_DIR          = '/kaggle/working/sft_qwen'
+GRPO_DIR         = '/kaggle/working/grpo_qwen'
 LOCAL_MERGED_DIR = '/kaggle/working/qwen-merged-16bit'
-HF_REPO = 'Abhinav-hf/data-pipeline-incident-qwen-grpo'
+# SFT model — pushed by training_grpo_qwen_merged.py (stage 1 upload)
+SFT_HF_REPO      = 'Abhinav-hf/qwen-grpo-sft-trained-16bit'
+# GRPO model — pushed by training_grpo_qwen_merged.py (stage 2 upload)
+GRPO_HF_REPO     = 'Abhinav-hf/qwen-grpo-complete-trained-16bit'
+# Legacy alias kept for backward compat
+HF_REPO          = SFT_HF_REPO
 
 try:
     from kaggle_secrets import UserSecretsClient
@@ -313,7 +318,8 @@ def run_episode(model, tokenizer, task_id: str, max_steps: int = MAX_STEPS, verb
     pipeline_passed = False
 
     try:
-        obs = env.reset()
+        res = env.reset()
+        obs = res[0] if isinstance(res, tuple) else res
         for step in range(1, max_steps + 1):
             if obs.pipeline_passed: break
             user_prompt = build_user_prompt(obs, step)
@@ -339,10 +345,18 @@ def run_episode(model, tokenizer, task_id: str, max_steps: int = MAX_STEPS, verb
             if len(history) > 10: history = history[-10:]
             
             result = env.step(action)
-            obs = result.observation
-            rewards.append(result.reward or 0.0)
+            if isinstance(result, tuple):
+                obs = result[0]
+                reward = result[1]
+                done = result[2]
+            else:
+                obs = result.observation
+                reward = result.reward
+                done = result.done
+                
+            rewards.append(reward or 0.0)
             steps_taken = step
-            if result.done: break
+            if done: break
 
         n_total = len(obs.failed_assertions) + len(obs.passed_assertions)
         n_passed = len(obs.passed_assertions)
@@ -367,7 +381,7 @@ def run_episode(model, tokenizer, task_id: str, max_steps: int = MAX_STEPS, verb
     }
 
 def collect_results(model_name: str, model_type: str, model, tokenizer, tasks: list):
-    print(f"\\n{'='*60}\\nEvaluating Model: {model_name} [{model_type}]\\n{'='*60}")
+    print(f"\n{'='*60}\nEvaluating Model: {model_name} [{model_type}]\n{'='*60}")
     results = []
     for task_id in tasks:
         r = run_episode(model, tokenizer, task_id, max_steps=MAX_STEPS, verbose=False)
@@ -375,93 +389,136 @@ def collect_results(model_name: str, model_type: str, model, tokenizer, tasks: l
         status = '[PASSED]' if r['pipeline_passed'] else '[FAILED]'
         print(f"  {r['task_id']:8s} | score={r['score']:.2f} | reward={r['total_reward']:+.2f} | steps={r['steps_taken']:2d} | {status}")
     avg_score = sum(r['score'] for r in results) / max(1, len(results))
-    print(f"  --> Average Score: {avg_score:.4f}\\n")
+    print(f"  --> Average Score: {avg_score:.4f}\n")
     return results
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="Evaluate Base vs SFT vs GRPO Qwen Models")
+    parser.add_argument(
+        '--models', nargs='+',
+        choices=['base', 'sft', 'grpo'],
+        # Default: base vs GRPO — this matches what training_grpo_qwen_merged.py produces.
+        # Use --models base sft grpo for a 3-way comparison.
+        default=['base', 'grpo'],
+        help='Select which models to evaluate (default: base grpo)'
+    )
+    args = parser.parse_args()
+
     tasks = [t for t in ['easy', 'medium', 'hard', 'hard2'] if t in _AVAILABLE_TASKS]
     all_reports = {}
 
     token_kwargs = {'token': HF_TOKEN} if HF_TOKEN else {}
 
-    print(f"[LOAD] Loading Base Model ({BASE_MODEL_ID}) in 16-bit...")
-    # NOTE: The Kaggle script used torch.float16, matching user request to not use 4bit here
+    print(f"[LOAD] Loading Base Tokenizer ({BASE_MODEL_ID})...")
     tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL_ID, **token_kwargs)
-    base_model = AutoModelForCausalLM.from_pretrained(
-        BASE_MODEL_ID, 
-        device_map='auto', 
-        torch_dtype=torch.float16,
-        **token_kwargs
-    )
-    base_model.eval()
     
     # 1. Base Model Eval
-    res_base = collect_results(BASE_MODEL_ID, "BASE", base_model, tokenizer, tasks)
-    all_reports['BASE'] = res_base
+    if 'base' in args.models:
+        print(f"[LOAD] Loading Base Model ({BASE_MODEL_ID}) in 16-bit...")
+        base_model = AutoModelForCausalLM.from_pretrained(
+            BASE_MODEL_ID, 
+            device_map='auto', 
+            torch_dtype=torch.float16,
+            **token_kwargs
+        )
+        base_model.eval()
+        
+        all_reports['BASE'] = collect_results(BASE_MODEL_ID, "BASE", base_model, tokenizer, tasks)
 
-    # 2. SFT Model Eval (Optional)
-    if os.path.exists(SFT_DIR):
-        print(f"[LOAD] Loading SFT Adapter from {SFT_DIR}...")
-        sft_model = PeftModel.from_pretrained(base_model, SFT_DIR)
-        sft_model.eval()
-        res_sft = collect_results("Qwen SFT", "SFT", sft_model, tokenizer, tasks)
-        all_reports['SFT'] = res_sft
-        sft_model.unload()  # Remove adapter to load GRPO
+        import gc
+        del base_model
+        torch.cuda.empty_cache()
+        gc.collect()
 
-    # Unload base model to ensure enough VRAM for fully-merged models
-    import gc
-    del base_model
-    torch.cuda.empty_cache()
-    gc.collect()
-
-    # 3. GRPO Model Eval (Optional)
-    grpo_model = None
-    try:
-        print(f"[LOAD] Trying to load GRPO Fully-Merged from HF ({HF_REPO})...")
-        grpo_model = AutoModelForCausalLM.from_pretrained(HF_REPO, device_map='auto', torch_dtype=torch.float16, **token_kwargs)
-    except Exception as e:
-        print(f"       HF load failed: {e}")
+    # 2. SFT Model Eval 
+    if 'sft' in args.models:
+        print(f"[LOAD] Loading SFT Fully-Merged from HF ({SFT_HF_REPO})...")
         try:
-            print(f"[LOAD] Trying to load fully-merged local model from {LOCAL_MERGED_DIR}...")
-            grpo_model = AutoModelForCausalLM.from_pretrained(LOCAL_MERGED_DIR, device_map='auto', torch_dtype=torch.float16, **token_kwargs)
-        except Exception as e2:
-            print(f"       Local fully-merged load failed: {e2}")
-            if os.path.exists(GRPO_DIR):
-                print(f"[LOAD] Falling back to GRPO Adapter {GRPO_DIR}...")
-                base_m = AutoModelForCausalLM.from_pretrained(BASE_MODEL_ID, device_map='auto', torch_dtype=torch.float16, **token_kwargs)
-                grpo_model = PeftModel.from_pretrained(base_m, GRPO_DIR)
+            sft_model = AutoModelForCausalLM.from_pretrained(SFT_HF_REPO, device_map='auto', torch_dtype=torch.float16, **token_kwargs)
+            sft_model.eval()
+            all_reports['SFT'] = collect_results("Qwen SFT", "SFT", sft_model, tokenizer, tasks)
             
-    if grpo_model is not None:
-        grpo_model.eval()
-        res_grpo = collect_results("Qwen GRPO", "GRPO", grpo_model, tokenizer, tasks)
-        all_reports['GRPO'] = res_grpo
-        if hasattr(grpo_model, 'unload'):
-            grpo_model.unload()
-        else:
-            del grpo_model
+            import gc
+            del sft_model
             torch.cuda.empty_cache()
             gc.collect()
+        except Exception as e:
+            print(f"[ERROR] Failed to load SFT model from {SFT_HF_REPO}: {e}")
 
-    # Final Comparison Report
-    print("\\n" + "="*80)
+    # 3. GRPO Model Eval 
+    if 'grpo' in args.models:
+        import gc
+        grpo_model = None
+
+        # Priority 1: local fully-merged directory (fastest)
+        if os.path.exists(LOCAL_MERGED_DIR):
+            print(f"[LOAD] Loading GRPO Fully-Merged from Local ({LOCAL_MERGED_DIR})...")
+            try:
+                grpo_model = AutoModelForCausalLM.from_pretrained(
+                    LOCAL_MERGED_DIR, device_map='auto', torch_dtype=torch.float16, **token_kwargs)
+            except Exception as e:
+                print(f"       Local load failed: {e}")
+
+        # Priority 2: HuggingFace Hub (matches training_grpo_qwen_merged.py upload)
+        if grpo_model is None:
+            print(f"[LOAD] Trying GRPO from HuggingFace Hub ({GRPO_HF_REPO})...")
+            try:
+                grpo_model = AutoModelForCausalLM.from_pretrained(
+                    GRPO_HF_REPO, device_map='auto', torch_dtype=torch.float16, **token_kwargs)
+            except Exception as e:
+                print(f"       HF Hub load failed: {e}")
+
+        # Priority 3: local LoRA adapter on top of base model
+        if grpo_model is None and os.path.exists(GRPO_DIR):
+            print(f"[LOAD] Falling back to GRPO LoRA Adapter ({GRPO_DIR})...")
+            try:
+                base_m = AutoModelForCausalLM.from_pretrained(
+                    BASE_MODEL_ID, device_map='auto', torch_dtype=torch.float16, **token_kwargs)
+                grpo_model = PeftModel.from_pretrained(base_m, GRPO_DIR)
+            except Exception as e:
+                print(f"       LoRA adapter load failed: {e}")
+
+        if grpo_model is not None:
+            grpo_model.eval()
+            all_reports['GRPO'] = collect_results("Qwen GRPO", "GRPO", grpo_model, tokenizer, tasks)
+            if hasattr(grpo_model, 'unload'):
+                grpo_model.unload()
+            else:
+                del grpo_model
+                torch.cuda.empty_cache()
+                gc.collect()
+        else:
+            print(f"[ERROR] Could not load GRPO model from any source. Skipping GRPO evaluation.")
+
+    print("\n" + "="*80)
     print("FINAL COMPARISON REPORT")
+    print(f"Models evaluated: {args.models}")
     print("="*80)
-    print(f"{'Task':<10}{'Base Score':<15}{'SFT Score':<15}{'GRPO Score':<15}")
-    print("-" * 80)
+
+    # ── Dynamic headers: only show columns for models that were actually run ──
+    # This prevents confusing '-' columns when only 2 of 3 models are evaluated.
+    evaluated_models = [m for m in ['base', 'sft', 'grpo'] if m in args.models]
+    model_keys  = {'base': 'BASE',  'sft': 'SFT',  'grpo': 'GRPO'}
+    model_labels = {'base': 'Base Score', 'sft': 'SFT Score', 'grpo': 'GRPO Score'}
+
+    col_w = 15
+    header = f"{'Task':<10}" + "".join(f"{model_labels[m]:<{col_w}}" for m in evaluated_models)
+    print(header)
+    print("-" * (10 + col_w * len(evaluated_models)))
 
     for task_id in tasks:
-        b_score = next((r['score'] for r in all_reports.get('BASE', []) if r['task_id'] == task_id), 0.0)
-        s_score = next((r['score'] for r in all_reports.get('SFT', []) if r['task_id'] == task_id), 0.0) if 'SFT' in all_reports else '-'
-        g_score = next((r['score'] for r in all_reports.get('GRPO', []) if r['task_id'] == task_id), 0.0) if 'GRPO' in all_reports else '-'
-        
-        b_str = f"{b_score:.2f}"
-        s_str = f"{s_score:.2f}" if isinstance(s_score, float) else s_score
-        g_str = f"{g_score:.2f}" if isinstance(g_score, float) else g_score
-        
-        print(f"{task_id:<10}{b_str:<15}{s_str:<15}{g_str:<15}")
-
-def test_imports():
-    pass
+        row = f"{task_id:<10}"
+        for m in evaluated_models:
+            key = model_keys[m]
+            results_list = all_reports.get(key, [])
+            if results_list:
+                sc = next((r['score'] for r in results_list if r['task_id'] == task_id), None)
+                row += f"{(f'{sc:.2f}' if sc is not None else 'N/A'):<{col_w}}"
+            else:
+                # Model was requested but failed to load
+                row += f"{'LOAD_ERR':<{col_w}}"
+        print(row)
 
 if __name__ == '__main__':
     main()

@@ -55,6 +55,19 @@ Meta PyTorch OpenEnv Hackathon — Round 2 Grand Finale
 - **All 6 Kaggle notebooks patched**: `importlib` module cache flush in clone cell + defensive `try/except TypeError` around env creation.
 - Model default updated: `Qwen/Qwen2.5-3B-Instruct` → `Qwen/Qwen2.5-1.5B-Instruct` across training scripts.
 
+### Completed on 2026-04-25 — Comparison Script Bug Fixes
+- **3 bugs fixed** in `inference_qwen_comparison_GRPO_vs_og.py`:
+  - **Bug 1**: `--models` default was `['base','sft']` but training produces a GRPO model. Changed default to `['base','grpo']`.
+  - **Bug 2**: Report header always showed `Base Score | SFT Score | GRPO Score` regardless of which models ran. Fixed to dynamic columns matching only evaluated models. Now also prints `Models evaluated: [...]`.
+  - **Bug 3**: Single `HF_REPO` constant was used for both SFT and GRPO but they live at different HF repos. Split into `SFT_HF_REPO='Abhinav-hf/qwen-grpo-sft-trained-16bit'` and `GRPO_HF_REPO='Abhinav-hf/qwen-grpo-complete-trained-16bit'`.
+- **GRPO loading** now has 3-tier priority: local merged dir → HF Hub → LoRA adapter.
+
+### HuggingFace Model Registry (current, authoritative)
+| Model | HF Repo | Uploaded by |
+|-------|---------|-------------|
+| SFT (merged 16-bit) | `Abhinav-hf/qwen-grpo-sft-trained-16bit` | `training_grpo_qwen_merged.py` stage 1 |
+| GRPO (merged 16-bit) | `Abhinav-hf/qwen-grpo-complete-trained-16bit` | `training_grpo_qwen_merged.py` stage 2 |
+
 ### Still Open (must complete before submission day)
 - GAP-004: Mini blog or 2-minute video (HuggingFace or YouTube).
 
