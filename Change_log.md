@@ -187,7 +187,10 @@
 - Uses the exact SYSTEM_PROMPT and formatting from the Kaggle runner to ensure apple-to-apple comparison.
 
 ### training_grpo_qwen notebook
-- Removed 4 bit quantization (Validated T4 VRAM footprint is secure thanks to LoRA usage).
-- Added 10000 context window. 
+- Converted `load_in_4bit=False` to `load_in_8bit=True` utilizing `bitsandbytes` 8-bit precision to fit gradients smoothly in 16GB VRAM while resolving SFT OOM exceptions.
+- Restored `grpo_train` cell and reduced active GRPO generation footprint (`num_generations=4`) to halve KV-cache overhead scaling. 
+- Clamped extreme context footprint overhead: `MAX_SEQ_LENGTH` scaled back drastically from 10000 -> 2048.
+- Redistributed dataset memory chunking: `per_device_train_batch_size` 2 -> 1, and `gradient_accumulation_steps` 4 -> 8.
 - Expanded `GOLD_ACTIONS` payload in Stage 1 SFT to enforce exact `hard` and `hard2` schema drift handling trajectories.
 - Doubled GRPOTrainer KL divergence (`beta=0.2`) to penalize severe deviation from SFT anchor points.
+- Fixed `BlockDiagonalCausalMask` unsloth compilation exception by injecting direct cache clearance scripts prior to transformers compilation alongside forcing rigorous fast unsloth/transformers upgrade sync.
