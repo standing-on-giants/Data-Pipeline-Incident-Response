@@ -1,4 +1,4 @@
-import os, sys, json, textwrap, re, torch
+import os, sys, json, textwrap, re, torch, argparse
 from typing import Any, Dict, List, Optional
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import PeftModel
@@ -11,7 +11,7 @@ BASE_MODEL_ID = 'Qwen/Qwen2.5-3B-Instruct'
 SFT_DIR = '/kaggle/working/sft_qwen'
 GRPO_DIR = '/kaggle/working/grpo_qwen'
 LOCAL_MERGED_DIR = '/kaggle/working/qwen-merged-16bit'
-HF_REPO = 'Abhinav-hf/data-pipeline-incident-qwen-grpo'
+HF_REPO = 'Abhinav-hf/qwen-grpo-sft-trained-16bit'
 
 try:
     from kaggle_secrets import UserSecretsClient
@@ -376,71 +376,81 @@ def collect_results(model_name: str, model_type: str, model, tokenizer, tasks: l
         print(f"  {r['task_id']:8s} | score={r['score']:.2f} | reward={r['total_reward']:+.2f} | steps={r['steps_taken']:2d} | {status}")
     avg_score = sum(r['score'] for r in results) / max(1, len(results))
     print(f"  --> Average Score: {avg_score:.4f}\\n")
-    return results
+    returndef main():
+    parser = argparse.ArgumentParser(description="Evaluate Base vs SFT vs GRPO Qwen Models")
+    parser.add_argument('--models', nargs='+', choices=['base', 'sft', 'grpo'], default=['base', 'sft'], help='Select which models to evaluate')
+    args = parser.parse_args()
 
-def main():
     tasks = [t for t in ['easy', 'medium', 'hard', 'hard2'] if t in _AVAILABLE_TASKS]
     all_reports = {}
 
     token_kwargs = {'token': HF_TOKEN} if HF_TOKEN else {}
 
-    print(f"[LOAD] Loading Base Model ({BASE_MODEL_ID}) in 16-bit...")
-    # NOTE: The Kaggle script used torch.float16, matching user request to not use 4bit here
+    # Define base tokenizer
     tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL_ID, **token_kwargs)
-    base_model = AutoModelForCausalLM.from_pretrained(
-        BASE_MODEL_ID, 
-        device_map='auto', 
-        torch_dtype=torch.float16,
-        **token_kwargs
-    )
-    base_model.eval()
     
     # 1. Base Model Eval
-    res_base = collect_results(BASE_MODEL_ID, "BASE", base_model, tokenizer, tasks)
-    all_reports['BASE'] = res_base
+    if 'base' in args.models:
+        print(f"[LOAD] Loading Base Model ({BASE_MODEL_ID}) in 16-bit...")
+        base_model = AutoModelForCausalLM.from_pretrained(
+            BASE_MODEL_ID, 
+            device_map='auto', 
+            torch_dtype=torch.float16,
+            **token_kwargs
+        )
+        base_model.eval()
+        
+        res_base = collect_results(BASE_MODEL_ID, "BASE", base_model, tokenizer, tasks)
+        all_reports['BASE'] = res_base
 
-    # 2. SFT Model Eval (Optional)
-    if os.path.exists(SFT_DIR):
-        print(f"[LOAD] Loading SFT Adapter from {SFT_DIR}...")
-        sft_model = PeftModel.from_pretrained(base_model, SFT_DIR)
-        sft_model.eval()
-        res_sft = collect_results("Qwen SFT", "SFT", sft_model, tokenizer, tasks)
-        all_reports['SFT'] = res_sft
-        sft_model.unload()  # Remove adapter to load GRPO
+        import gc
+        del base_model
+        torch.cuda.empty_cache()
+        gc.collect()
 
-    # Unload base model to ensure enough VRAM for fully-merged models
-    import gc
-    del base_model
-    torch.cuda.empty_cache()
-    gc.collect()
-
-    # 3. GRPO Model Eval (Optional)
-    grpo_model = None
-    try:
-        print(f"[LOAD] Trying to load GRPO Fully-Merged from HF ({HF_REPO})...")
-        grpo_model = AutoModelForCausalLM.from_pretrained(HF_REPO, device_map='auto', torch_dtype=torch.float16, **token_kwargs)
-    except Exception as e:
-        print(f"       HF load failed: {e}")
+    # 2. SFT Model Eval 
+    if 'sft' in args.models:
+        print(f"[LOAD] Loading SFT Fully-Merged from HF ({HF_REPO})...")
         try:
-            print(f"[LOAD] Trying to load fully-merged local model from {LOCAL_MERGED_DIR}...")
+            sft_model = AutoModelForCausalLM.from_pretrained(HF_REPO, device_map='auto', torch_dtype=torch.float16, **token_kwargs)
+            sft_model.eval()
+            res_sft = collect_results("Qwen SFT", "SFT", sft_model, tokenizer, tasks)
+            all_reports['SFT'] = res_sft
+            
+            import gc
+            del sft_model
+            torch.cuda.empty_cache()
+            gc.collect()
+        except Exception as e:
+            print(f"[ERROR] Failed to load SFT model from {HF_REPO}: {e}")
+
+    # 3. GRPO Model Eval 
+    if 'grpo' in args.models:
+        grpo_model = None
+        try:
+            # Modify HF_REPO_GRPO when the GRPO repo is ready. For now defaulting to HF_REPO or Local.
+            print(f"[LOAD] Trying to load GRPO Fully-Merged from HuggingFace...")
+            # We assume a future GRPO repo will exist, fallback to local
             grpo_model = AutoModelForCausalLM.from_pretrained(LOCAL_MERGED_DIR, device_map='auto', torch_dtype=torch.float16, **token_kwargs)
-        except Exception as e2:
-            print(f"       Local fully-merged load failed: {e2}")
+        except Exception as e:
+            print(f"       Load failed: {e}")
             if os.path.exists(GRPO_DIR):
                 print(f"[LOAD] Falling back to GRPO Adapter {GRPO_DIR}...")
                 base_m = AutoModelForCausalLM.from_pretrained(BASE_MODEL_ID, device_map='auto', torch_dtype=torch.float16, **token_kwargs)
                 grpo_model = PeftModel.from_pretrained(base_m, GRPO_DIR)
+                
+        if grpo_model is not None:
+            grpo_model.eval()
+            res_grpo = collect_results("Qwen GRPO", "GRPO", grpo_model, tokenizer, tasks)
+            all_reports['GRPO'] = res_grpo
             
-    if grpo_model is not None:
-        grpo_model.eval()
-        res_grpo = collect_results("Qwen GRPO", "GRPO", grpo_model, tokenizer, tasks)
-        all_reports['GRPO'] = res_grpo
-        if hasattr(grpo_model, 'unload'):
-            grpo_model.unload()
-        else:
-            del grpo_model
-            torch.cuda.empty_cache()
-            gc.collect()
+            import gc
+            if hasattr(grpo_model, 'unload'):
+                grpo_model.unload()
+            else:
+                del grpo_model
+                torch.cuda.empty_cache()
+                gc.collect()
 
     # Final Comparison Report
     print("\\n" + "="*80)
@@ -450,11 +460,11 @@ def main():
     print("-" * 80)
 
     for task_id in tasks:
-        b_score = next((r['score'] for r in all_reports.get('BASE', []) if r['task_id'] == task_id), 0.0)
-        s_score = next((r['score'] for r in all_reports.get('SFT', []) if r['task_id'] == task_id), 0.0) if 'SFT' in all_reports else '-'
-        g_score = next((r['score'] for r in all_reports.get('GRPO', []) if r['task_id'] == task_id), 0.0) if 'GRPO' in all_reports else '-'
+        b_score = next((r['score'] for r in all_reports.get('BASE', []) if r['task_id'] == task_id), 0.0) if 'base' in args.models else '-'
+        s_score = next((r['score'] for r in all_reports.get('SFT', []) if r['task_id'] == task_id), 0.0) if 'sft' in args.models else '-'
+        g_score = next((r['score'] for r in all_reports.get('GRPO', []) if r['task_id'] == task_id), 0.0) if 'grpo' in args.models else '-'
         
-        b_str = f"{b_score:.2f}"
+        b_str = f"{b_score:.2f}" if isinstance(b_score, float) else b_score
         s_str = f"{s_score:.2f}" if isinstance(s_score, float) else s_score
         g_str = f"{g_score:.2f}" if isinstance(g_score, float) else g_score
         
