@@ -47,7 +47,7 @@ try:
 except Exception:
     HF_TOKEN = os.getenv('HF_TOKEN')
 
-MAX_TOKENS = 1024
+MAX_TOKENS = 10000
 TEMPERATURE = 0.1
 # 25 steps per episode for full evaluation; use --steps 10 for a quick sanity check.
 MAX_STEPS = 25
