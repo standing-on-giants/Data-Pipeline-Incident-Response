@@ -258,3 +258,9 @@ for credit assignment in a 20-step episode.
 - DECISION: SFT and GRPO are now separated into distinct notebook cells so GRPO can be re-run independently without re-running SFT.
 - DECISION: Remove EarlyStoppingCallback entirely rather than fight Unsloth 8-bit compatibility. 2 epochs is sufficient overfitting protection with reduced LR.
 - PENDING DECISION: GRPO reward collapse fix — options being evaluated: (a) reduce LR 5e-5->1e-5, (b) add cosine LR scheduler, (c) increase warmup steps, (d) soften invalid JSON penalty from -0.3 to -0.1 for near-misses, (e) reduce max_grad_norm 1.0->0.3.
+
+### D-019 · Resolve GRPO reward collapse with lower LR, warmup, cosine decay, tighter clipping, and softer JSON near-miss penalty
+**Date:** 2026-04-25
+**Decision:** In `train_grpo/train_grpo_qwen_merged.ipynb`, set GRPO `learning_rate=1e-5`, `warmup_steps=20`, `max_grad_norm=0.3`, add `lr_scheduler_type='cosine'` with `lr_scheduler_kwargs={}`, and change invalid-JSON reward handling to give `-0.1` when braces exist but parse fails (keep `-0.3` when no JSON structure exists).
+**Rationale:** Training collapsed after ~50 steps because high LR with near-zero warmup pushed policy outputs into invalid JSON, where a flat `-0.3` penalty removed useful gradient differences between near-correct and fully-garbage outputs. Lower LR + proper warmup + cosine decay reduces update volatility; tighter clipping prevents gradient spikes; softer near-miss penalty preserves a recoverable learning signal.
+**Tradeoff:** Slightly slower early optimization and potentially smaller short-term reward jumps, accepted for improved stability and reduced collapse risk over full GRPO runs.

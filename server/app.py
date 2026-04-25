@@ -1,175 +1,153 @@
-"""
-OpenEnv-compliant REST and WebSocket server for the Data Pipeline Incident Response environment.
-
-Protocol:
-  REST Endpoint:
-    POST /reset:  {"task_id": "easy|medium|hard"}
-    POST /step:   {"action": {"action_type": "...", "params": {...}}}
-    GET /health:  healthcheck
-
-  WebSocket Endpoint:
-    Client → Server: JSON message with "action" field
-      reset:  {"action": "reset", "task_id": "easy|medium|hard"}
-      step:   {"action": {"action_type": "...", "params": {...}}}
-      state:  {"action": "state"}
-"""
 from __future__ import annotations
-import json
 import os
-from typing import Dict, Optional
+import logging
+from typing import Any, Dict, Optional
 
-import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, HTTPException, Body
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from src.environment import DataPipelineEnv
 from src.models import PipelineAction
 
-app = FastAPI(title="Data Pipeline Incident Response — OpenEnv")
 
-# Global env for HTTP REST mode
-_global_env: Optional[DataPipelineEnv] = None
+# ---------------- LOGGING ---------------- #
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("openenv")
+
+
+# ---------------- APP ---------------- #
+
+app = FastAPI(
+    title="Data Pipeline Incident Response — OpenEnv",
+    description="AI agent environment for debugging data pipelines.",
+    version="1.1.0",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# ---------------- SESSION STORE ---------------- #
+
+_sessions: Dict[str, DataPipelineEnv] = {}
+current_session_id: Optional[str] = None
+
+
+# ---------------- REQUEST ---------------- #
 
 class ResetRequest(BaseModel):
     task_id: str = "easy"
 
-class StepRequest(BaseModel):
-    action: PipelineAction
 
-# ------------------------------------------------------------------ #
-# Health check
-# ------------------------------------------------------------------ #
-
-@app.get("/health")
-async def health():
-    return {"status": "ok", "env": "data-pipeline-incident-response"}
+# ---------------- ROOT ---------------- #
 
 @app.get("/")
-async def root():
-    return {
-        "name": "Data Pipeline Incident Response",
-        "version": "1.0.0",
-        "tasks": ["easy", "medium", "hard", "hard2"],
-        "openenv_spec": "0.1",
-        "websocket_endpoint": "/ws",
-        "rest_endpoints": ["/reset", "/step"]
-    }
+def root():
+    return {"status": "ok", "env": "data-pipeline", "version": "1.1.0"}
 
-# ------------------------------------------------------------------ #
-# REST endpoints
-# ------------------------------------------------------------------ #
+
+@app.get("/health")
+def health():
+    return {"status": "healthy"}
+
+
+# ---------------- RESET ---------------- #
 
 @app.post("/reset")
-async def reset_env(req: ResetRequest):
-    global _global_env
-    _global_env = DataPipelineEnv(task_id=req.task_id)
-    obs, info = _global_env.reset()
+def reset(req: Optional[ResetRequest] = Body(default=None)):
+    global current_session_id
+
+    task_id = req.task_id if req else "easy"
+
+    env = DataPipelineEnv(task_id=task_id)
+    session_id = f"{task_id}_{id(env)}"
+
+    _sessions[session_id] = env
+    current_session_id = session_id
+
+    obs, _ = env.reset()
+
+    logger.info(f"[RESET] task={task_id} session={session_id}")
+
     return {
-        "observation": obs.model_dump(),
-        "reward": 0.0,
-        "terminated": False,
-        "truncated": False,
-        "done": False,
-        "info": info,
+        "session_id": session_id,
+        "observation": obs.model_dump()
     }
 
+
+# ---------------- STEP ---------------- #
+
 @app.post("/step")
-async def step_env(req: StepRequest):
-    global _global_env
-    if _global_env is None:
-        raise HTTPException(status_code=400, detail="Call /reset first.")
-    
-    result = _global_env.step(req.action)
+def step(body: Dict[str, Any] = Body(...)):
+    global current_session_id
+
+    session_id = body.pop("session_id", None) or current_session_id
+
+    if session_id is None:
+        raise HTTPException(status_code=400, detail="Call /reset first")
+
+    env = _sessions.get(session_id)
+    if env is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    try:
+        action = PipelineAction(**body)
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    result = env.step(action)
+
+    logger.info(
+        f"[STEP] session={session_id} action={action.action_type} "
+        f"reward={result.reward} done={result.done}"
+    )
+
     return {
         "observation": result.observation.model_dump(),
         "reward": result.reward,
-        "terminated": result.terminated,
-        "truncated": result.truncated,
-        "done": result.done,
-        "info": result.info,
+        "done": result.done
     }
 
-# ------------------------------------------------------------------ #
-# WebSocket endpoint — one session per connection
-# ------------------------------------------------------------------ #
 
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    await websocket.accept()
+# ---------------- STATE ---------------- #
 
-    env: DataPipelineEnv | None = None
+@app.get("/state")
+def state():
+    global current_session_id
 
-    try:
-        while True:
-            raw = await websocket.receive_text()
-            try:
-                msg = json.loads(raw)
-            except json.JSONDecodeError:
-                await _send_error(websocket, "Invalid JSON.")
-                continue
+    if current_session_id is None:
+        return {"status": "not_initialized"}
 
-            action_field = msg.get("action")
-
-            # ---- RESET ----
-            if action_field == "reset":
-                task_id = msg.get("task_id", "easy")
-                env = DataPipelineEnv(task_id=task_id)
-                obs, info = env.reset()
-                await websocket.send_text(json.dumps({
-                    "observation": obs.model_dump(),
-                    "reward": 0.0,
-                    "terminated": False,
-                    "truncated": False,
-                    "done": False,
-                    "info": info,
-                }))
-
-            # ---- STATE ----
-            elif action_field == "state":
-                if env is None:
-                    await _send_error(websocket, "Call reset first.")
-                    continue
-                await websocket.send_text(json.dumps({"state": env.state()}))
-
-            # ---- STEP ----
-            elif isinstance(action_field, dict):
-                if env is None:
-                    await _send_error(websocket, "Call reset first.")
-                    continue
-                try:
-                    action = PipelineAction(**action_field)
-                except Exception as e:
-                    await _send_error(websocket, f"Invalid action: {e}")
-                    continue
-
-                result = env.step(action)
-                await websocket.send_text(json.dumps({
-                    "observation": result.observation.model_dump(),
-                    "reward": result.reward,
-                    "terminated": result.terminated,
-                    "truncated": result.truncated,
-                    "done": result.done,
-                    "info": result.info,
-                }))
-
-            else:
-                await _send_error(websocket, f"Unknown action: {action_field!r}")
-
-    except WebSocketDisconnect:
-        pass
+    return _sessions[current_session_id].state()
 
 
-async def _send_error(ws: WebSocket, msg: str):
-    await ws.send_text(json.dumps({"error": msg}))
+# ---------------- TASKS ---------------- #
+
+@app.get("/tasks")
+def tasks():
+    return {
+        "tasks": [
+            {"task_id": "easy", "difficulty": "easy"},
+            {"task_id": "medium", "difficulty": "medium"},
+            {"task_id": "hard", "difficulty": "hard"},
+            {"task_id": "hard2", "difficulty": "hard"},
+        ]
+    }
 
 
-# ------------------------------------------------------------------ #
-# Entry point
-# ------------------------------------------------------------------ #
+# ---------------- ENTRY ---------------- #
 
 def main():
-    port = int(os.getenv("PORT", 8001))
-    uvicorn.run("server.app:app", host="0.0.0.0", port=port, workers=1)
+    import uvicorn
+    port = int(os.getenv("PORT", 7860))
+    uvicorn.run(app, host="0.0.0.0", port=port)
+
 
 if __name__ == "__main__":
     main()
