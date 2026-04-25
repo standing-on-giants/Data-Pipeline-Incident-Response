@@ -239,3 +239,27 @@
   - Fixed SFT loading to use `SFT_HF_REPO`
   - Fixed GRPO loading: 3-tier priority (local → HF Hub → LoRA adapter), with explicit error if all fail
   - Fixed report table: dynamic columns, only shows evaluated models, prints `Models evaluated: [...]`
+
+## 2026-04-25 — GRPO Reward Collapse Stabilization (Qwen merged notebook)
+
+- Updated `train_grpo/train_grpo_qwen_merged.ipynb` GRPO config for collapse recovery:
+  - `learning_rate`: `5e-5` -> `1e-5`
+  - `warmup_steps`: `1` -> `20`
+  - Added `lr_scheduler_type='cosine'` and `lr_scheduler_kwargs={}`
+  - `max_grad_norm`: `1.0` -> `0.3`
+- Updated `pipeline_reward_fn` invalid-JSON penalty block:
+  - Kept hard penalty `-0.3` for no JSON structure
+  - Added softer `-0.1` partial credit when braces exist but JSON is unparseable
+- Intentionally left unchanged: beta/temperature/generation count/batch sizes, SFT section, JSON patch, smoke test cell, and save/push-to-hub logic.
+
+## 2026-04-25 — Source-control visible mirror update
+
+- Applied the same GRPO collapse fixes in `train_grpo/training_grpo_qwen_merged.py` (script mirror of the notebook) so the changes are immediately visible in git/source control.
+
+## 2026-04-25 — Direct notebook fix applied
+
+- Applied the GRPO collapse fix directly in `train_grpo/train_grpo_qwen_merged.ipynb`:
+  - `learning_rate=1e-5`
+  - `max_grad_norm=0.3`
+  - `warmup_steps=20` with `lr_scheduler_type='cosine'` and `lr_scheduler_kwargs={}`
+  - invalid-JSON reward block updated to partial-credit `-0.1` for brace-containing near-miss outputs.

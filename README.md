@@ -1,3 +1,12 @@
+---
+title: Data Pipeline Incident Qwen GRPO
+emoji: 📊
+colorFrom: pink
+colorTo: pink
+sdk: docker
+pinned: false
+---
+
 # Data Pipeline Incident Response — OpenEnv Environment
 
 **Meta PyTorch OpenEnv Hackathon · Round 2**
@@ -12,6 +21,20 @@ This environment simulates a real-world data engineering incident room. Every da
 An AI agent is placed inside a broken pipeline and must diagnose the root cause, apply the correct fix, and verify the pipeline passes — without hallucinating fixes it hasn't confirmed via data inspection.
 
 **The novel contribution for Round 2:** dynamic schema drift injected mid-episode. After the agent applies initial fixes, the upstream API *mutates again* (column rename → auth format rotation → rate limit tightening), forcing the agent to detect and adapt to live contract changes — not just resolve a static fault.
+
+---
+
+## 📖 The Story (Hackathon Criterion: Storytelling & Presentation)
+
+**The Problem**
+Data pipelines break every single day in production. A vendor silently changes an API export format, numeric fields arrive as currency strings, deduplication keys shift, or join keys grow unexpected prefixes. Today, Data Engineers are woken up at 2 AM to manually write SQL queries, check schemas, and push hotfixes. It’s tedious, manual, and reactive. We need an AI agent that can act as an autonomous Level 1 On-Call Data Engineer.
+
+**The Environment**
+We built a fully interactive incident room for AI agents. Instead of just "generating code," the agent is dropped into a live, broken pipeline graph. It receives an alert (failing data quality assertions) and must iteratively query the data (`read_data_sample`, `compare_schema`), diagnose the root cause, and apply structural patches (`add_data_filter`, `patch_transformation`). 
+
+**What the Agent Learned**
+At first, smaller models like Qwen 1.5B/3B and LLaMA 3.1 8B failed completely. They would hallucinate fixes without looking at the data, get stuck in infinite loops, or blindly sweep errors under the rug. 
+Through aggressive reward shaping and GRPO training, the agent learned a disciplined, professional workflow. It learned that it *must* inspect the schema before patching. It learned to break out of its own loops by reviewing its trajectory history. Ultimately, it transformed from a chaotic code-generator into a methodical, reasoning-driven Data Engineer.
 
 ---
 
