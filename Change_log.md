@@ -185,3 +185,9 @@
 ### NEW: inference_comparison_qwen.py
 - Created a standalone Python script to evaluate base, sft, and grpo Qwen models natively using transformers + peft.
 - Uses the exact SYSTEM_PROMPT and formatting from the Kaggle runner to ensure apple-to-apple comparison.
+
+### training_grpo_qwen notebook
+- Removed 4 bit quantization (Validated T4 VRAM footprint is secure thanks to LoRA usage).
+- Added 10000 context window. 
+- Expanded `GOLD_ACTIONS` payload in Stage 1 SFT to enforce exact `hard` and `hard2` schema drift handling trajectories.
+- Doubled GRPOTrainer KL divergence (`beta=0.2`) to penalize severe deviation from SFT anchor points.
