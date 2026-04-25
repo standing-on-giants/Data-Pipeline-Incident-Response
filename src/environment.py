@@ -79,7 +79,7 @@ class DataPipelineEnv:
     # Public API
     # ------------------------------------------------------------------ #
 
-    def reset(self, task_id: Optional[str] = None) -> PipelineObservation:
+    def reset(self, task_id: Optional[str] = None) -> Tuple[PipelineObservation, Dict[str, Any]]:
         if task_id:
             self.task_id = task_id
 
@@ -109,7 +109,9 @@ class DataPipelineEnv:
         self._last_assertion_results = self._run_all_assertions()
         self._prev_passed_ids = {r.assertion_id for r in self._last_assertion_results if r.passed}
 
-        return self._build_observation()
+        obs = self._build_observation()
+        info: Dict[str, Any] = {"task_id": self.task_id, "max_steps": self.MAX_STEPS}
+        return obs, info
 
     def step(self, action: PipelineAction) -> StepResult:
         if self._done:
@@ -135,12 +137,14 @@ class DataPipelineEnv:
         # Check terminal condition
         all_passed    = all(r.passed for r in self._last_assertion_results)
         max_steps_hit = self._step_number >= self.MAX_STEPS
-        self._done    = all_passed or max_steps_hit
+        terminated    = all_passed          # goal achieved
+        truncated     = max_steps_hit and not all_passed  # budget exhausted
+        self._done    = terminated or truncated
 
         # Terminal bonus: scaled by step efficiency.
         # Full +2.0 if solved in ≤ 30 % of budget, decays linearly to +1.0 at 100 %.
         # This incentivises concise diagnosis → fix → run sequences.
-        if all_passed:
+        if terminated:
             budget_used = self._step_number / max(self.MAX_STEPS, 1)
             efficiency_scale = 1.0 + max(0.0, 1.0 - budget_used / 0.3)
             terminal_bonus = round(efficiency_scale, 3)
@@ -150,12 +154,13 @@ class DataPipelineEnv:
                 f" [PASSED] ALL ASSERTIONS PASSING — episode complete! "
                 f"Efficiency bonus: +{terminal_bonus:.2f}"
             )
-        elif max_steps_hit and not all_passed:
+        elif truncated:
             self._last_action_result += " [WARNING] Max steps reached."
 
         obs = self._build_observation()
         return StepResult(
-            observation=obs, reward=reward, done=self._done,
+            observation=obs, reward=reward,
+            terminated=terminated, truncated=truncated,
             info={"total_reward": round(self._reward_accumulator, 3)},
         )
 
@@ -171,8 +176,61 @@ class DataPipelineEnv:
         }
 
     def close(self) -> None:
-        """BUG FIX 5: OpenEnv spec requires close() to exist. No-op for this env."""
+        """OpenEnv spec requires close() to exist. No-op for this env."""
         pass
+
+    # ------------------------------------------------------------------ #
+    # OpenEnv introspection — action_space / observation_space
+    # ------------------------------------------------------------------ #
+
+    @property
+    def action_space(self) -> Dict[str, Any]:
+        """
+        Returns a description of all valid actions and their parameter schemas.
+        Allows OpenEnv-compatible runners to introspect the action space without
+        running an episode.
+        """
+        return {
+            "type": "discrete_parameterised",
+            "actions": {
+                "read_data_sample":     {"table": "str", "n_rows": "int (default 20)",
+                                         "filter_col": "str|None", "filter_val": "Any|None"},
+                "check_schema":         {"table": "str"},
+                "compare_schema":       {"table": "str"},
+                "handle_drift":         {"strategy": "str", "table": "str", "step_id": "str",
+                                         "column": "str", "filter_condition": "str",
+                                         "team": "str", "issue_description": "str",
+                                         "old_column": "str", "new_column": "str"},
+                "run_quality_assertion":{"assertion_id": "str"},
+                "add_data_filter":      {"step_id": "str", "filter_condition": "str"},
+                "patch_transformation": {"step_id": "str", "patch_type": "str",
+                                         "column": "str", "default_value": "Any|None",
+                                         "target_type": "str|None"},
+                "backfill_partition":   {"date": "str (YYYY-MM-DD)"},
+                "alert_upstream_team":  {"team": "str", "issue_description": "str"},
+                "mark_acceptable":      {"assertion_id": "str", "reason": "str"},
+                "run_pipeline":         {},
+            },
+            "patch_types":    ["cast_column", "coalesce", "dedup", "parse_currency", "strip_prefix"],
+            "filter_operators": ["IS NOT NULL", "IS NULL", ">=", "<="],
+            "handle_drift_strategies": [
+                "detect", "numeric_format", "null_fill", "type_cast",
+                "join_key_prefix", "filter_invalid", "alert_upstream",
+                "resolve_column_rename", "column_rename",
+            ],
+        }
+
+    @property
+    def observation_space(self) -> Dict[str, Any]:
+        """
+        Returns the schema of the observation returned by reset() and step().
+        Allows OpenEnv-compatible runners to introspect observation fields without
+        running an episode.
+        """
+        return {
+            "type": "structured",
+            "schema": PipelineObservation.model_json_schema(),
+        }
 
     # ------------------------------------------------------------------ #
     # Action dispatcher
@@ -712,12 +770,18 @@ class DataPipelineEnv:
             HistoricalRun(**r) for r in self._task.get("historical_runs", [])
         ]
 
+        # Populate available_tables: union of raw table names and all pipeline output names,
+        # deduplicated and sorted so the agent gets a stable, complete list every step.
+        all_table_names = sorted(
+            set(self._raw_tables.keys()) | set(self._all_tables.keys())
+        )
+
         return PipelineObservation(
             task_id=self.task_id,
             difficulty=self._task.get("difficulty", ""),
             description=self._task.get("description", ""),
             step_number=self._step_number,
-            max_steps=self.MAX_STEPS,   # BUG FIX 1: now reflects instance value
+            max_steps=self.MAX_STEPS,
             dag_structure=dag_nodes,
             failed_assertions=failed,
             passed_assertions=passed,
@@ -726,6 +790,7 @@ class DataPipelineEnv:
             current_schema=self._last_schema,
             historical_schema=self._last_hist_schema,
             schema_diff=self._last_schema_diff,
+            available_tables=all_table_names,
             last_action_result=self._last_action_result,
             actions_taken=list(self._actions_taken),
             pipeline_passed=all_ok,

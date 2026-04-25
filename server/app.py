@@ -63,12 +63,14 @@ async def root():
 async def reset_env(req: ResetRequest):
     global _global_env
     _global_env = DataPipelineEnv(task_id=req.task_id)
-    obs = _global_env.reset()
+    obs, info = _global_env.reset()
     return {
         "observation": obs.model_dump(),
         "reward": 0.0,
+        "terminated": False,
+        "truncated": False,
         "done": False,
-        "info": {"task_id": req.task_id},
+        "info": info,
     }
 
 @app.post("/step")
@@ -81,6 +83,8 @@ async def step_env(req: StepRequest):
     return {
         "observation": result.observation.model_dump(),
         "reward": result.reward,
+        "terminated": result.terminated,
+        "truncated": result.truncated,
         "done": result.done,
         "info": result.info,
     }
@@ -110,12 +114,14 @@ async def websocket_endpoint(websocket: WebSocket):
             if action_field == "reset":
                 task_id = msg.get("task_id", "easy")
                 env = DataPipelineEnv(task_id=task_id)
-                obs = env.reset()
+                obs, info = env.reset()
                 await websocket.send_text(json.dumps({
                     "observation": obs.model_dump(),
                     "reward": 0.0,
+                    "terminated": False,
+                    "truncated": False,
                     "done": False,
-                    "info": {"task_id": task_id},
+                    "info": info,
                 }))
 
             # ---- STATE ----
@@ -140,6 +146,8 @@ async def websocket_endpoint(websocket: WebSocket):
                 await websocket.send_text(json.dumps({
                     "observation": result.observation.model_dump(),
                     "reward": result.reward,
+                    "terminated": result.terminated,
+                    "truncated": result.truncated,
                     "done": result.done,
                     "info": result.info,
                 }))

@@ -119,5 +119,11 @@ class PipelineAction(BaseModel):
 class StepResult(BaseModel):
     observation: PipelineObservation
     reward: float
-    done: bool
+    terminated: bool   # True when goal achieved (all assertions pass)
+    truncated: bool    # True when step budget exhausted without solving
     info: Dict[str, Any] = Field(default_factory=dict)
+
+    @property
+    def done(self) -> bool:
+        """Backward-compatible alias: episode is over if terminated OR truncated."""
+        return self.terminated or self.truncated
