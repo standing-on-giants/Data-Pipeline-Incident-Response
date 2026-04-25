@@ -50,7 +50,7 @@ except Exception:
 MAX_TOKENS = 10000
 TEMPERATURE = 0.1
 # 25 steps per episode for full evaluation; use --steps 10 for a quick sanity check.
-MAX_STEPS = 25
+MAX_STEPS = 100
 BENCHMARK = 'data_pipeline_incident_response'
 SUCCESS_SCORE_THRESHOLD = 0.1
 FALLBACK_ACTION = PipelineAction(action_type='compare_schema', params={'table': 'insights_ads'})
