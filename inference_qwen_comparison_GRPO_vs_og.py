@@ -27,6 +27,8 @@ except Exception:
 
 MAX_TOKENS = 512
 TEMPERATURE = 0.1
+# 15 steps is enough for the comparison run — saves ~40% vs 25 steps.
+# Increase to 25 if you want full-depth evaluation.
 MAX_STEPS = 25
 BENCHMARK = 'data_pipeline_incident_response'
 SUCCESS_SCORE_THRESHOLD = 0.1
@@ -317,6 +319,9 @@ def run_episode(model, tokenizer, task_id: str, max_steps: int = MAX_STEPS, verb
     n_total = 0
     pipeline_passed = False
 
+    if verbose:
+        print(f"  [START] task={task_id}  max_steps={max_steps}")
+
     try:
         res = env.reset()
         obs = res[0] if isinstance(res, tuple) else res
@@ -325,7 +330,7 @@ def run_episode(model, tokenizer, task_id: str, max_steps: int = MAX_STEPS, verb
             user_prompt = build_user_prompt(obs, step)
             history.append({'role': 'user', 'content': user_prompt})
             messages = [{'role': 'system', 'content': SYSTEM_PROMPT}] + history
-            
+
             torch.cuda.empty_cache()
             response_text = ''
             try:
@@ -335,15 +340,15 @@ def run_episode(model, tokenizer, task_id: str, max_steps: int = MAX_STEPS, verb
                 messages = [{'role': 'system', 'content': SYSTEM_PROMPT}] + history
                 torch.cuda.empty_cache()
                 response_text = generate(model, tokenizer, messages)
-            
+
             action = parse_llm_response(response_text)
             if action.action_type == 'run_pipeline' and not response_text.strip():
                 if obs.failed_assertions:
                     action = PipelineAction(action_type='compare_schema', params={'table': obs.failed_assertions[0].table})
-            
+
             history.append({'role': 'assistant', 'content': response_text or '{}'})
             if len(history) > 10: history = history[-10:]
-            
+
             result = env.step(action)
             if isinstance(result, tuple):
                 obs = result[0]
@@ -353,9 +358,17 @@ def run_episode(model, tokenizer, task_id: str, max_steps: int = MAX_STEPS, verb
                 obs = result.observation
                 reward = result.reward
                 done = result.done
-                
+
             rewards.append(reward or 0.0)
             steps_taken = step
+
+            if verbose:
+                n_pass_now = len(obs.passed_assertions)
+                n_fail_now = len(obs.failed_assertions)
+                pipe_ok = '[PIPELINE_PASSED]' if obs.pipeline_passed else ''
+                print(f"    step {step:2d}/{max_steps} | action={action.action_type:<30s} "
+                      f"| reward={reward:+.2f} | pass={n_pass_now} fail={n_fail_now} {pipe_ok}")
+
             if done: break
 
         n_total = len(obs.failed_assertions) + len(obs.passed_assertions)
@@ -363,13 +376,17 @@ def run_episode(model, tokenizer, task_id: str, max_steps: int = MAX_STEPS, verb
         pipeline_passed = obs.pipeline_passed
         raw_score = n_passed / n_total if n_total > 0 else 0.0
         score = min(max(raw_score, 0.01), 0.99)
-        
+
     except Exception as exc:
-        print(f"[ERROR] {task_id}: {exc}", file=sys.stderr)
+        print(f"  [ERROR] {task_id}: {exc}", file=sys.stderr)
     finally:
         try: env.close()
         except: pass
-    
+
+    if verbose:
+        status = '[PASSED]' if pipeline_passed else '[FAILED]'
+        print(f"  [DONE]  task={task_id} score={score:.2f} steps={steps_taken} {status}")
+
     return {
         'task_id': task_id,
         'score': round(score, 4),
@@ -381,15 +398,21 @@ def run_episode(model, tokenizer, task_id: str, max_steps: int = MAX_STEPS, verb
     }
 
 def collect_results(model_name: str, model_type: str, model, tokenizer, tasks: list):
-    print(f"\n{'='*60}\nEvaluating Model: {model_name} [{model_type}]\n{'='*60}")
+    import time
+    print(f"\n{'='*60}\nEvaluating: {model_name} [{model_type}]  ({len(tasks)} tasks, max {MAX_STEPS} steps each)\n{'='*60}")
     results = []
+    t_start = time.time()
     for task_id in tasks:
-        r = run_episode(model, tokenizer, task_id, max_steps=MAX_STEPS, verbose=False)
+        print(f"\n  --> Task: {task_id}")
+        r = run_episode(model, tokenizer, task_id, max_steps=MAX_STEPS, verbose=True)
         results.append(r)
         status = '[PASSED]' if r['pipeline_passed'] else '[FAILED]'
-        print(f"  {r['task_id']:8s} | score={r['score']:.2f} | reward={r['total_reward']:+.2f} | steps={r['steps_taken']:2d} | {status}")
+        elapsed = time.time() - t_start
+        print(f"  RESULT {r['task_id']:8s} | score={r['score']:.2f} | reward={r['total_reward']:+.2f} "
+              f"| steps={r['steps_taken']:2d} | assertions={r['assertions_passed']}/{r['assertions_total']} "
+              f"| elapsed={elapsed:.0f}s | {status}")
     avg_score = sum(r['score'] for r in results) / max(1, len(results))
-    print(f"  --> Average Score: {avg_score:.4f}\n")
+    print(f"\n  --> Average Score: {avg_score:.4f}  |  Total elapsed: {time.time()-t_start:.0f}s\n")
     return results
 
 def main():
