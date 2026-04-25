@@ -313,7 +313,7 @@ def run_episode(model, tokenizer, task_id: str, max_steps: int = MAX_STEPS, verb
     pipeline_passed = False
 
     try:
-        obs = env.reset()
+        obs, _ = env.reset()
         for step in range(1, max_steps + 1):
             if obs.pipeline_passed: break
             user_prompt = build_user_prompt(obs, step)
