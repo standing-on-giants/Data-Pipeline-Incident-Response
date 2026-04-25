@@ -1,4 +1,4 @@
-﻿import os, sys, json, textwrap, re, torch, argparse
+﻿import os, sys, json, textwrap, re, torch, argparse, warnings, time
 from typing import Any, Dict, List, Optional
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 from peft import PeftModel
@@ -8,6 +8,27 @@ from src.models import PipelineAction, PipelineObservation
 from src.tasks import TASKS as _AVAILABLE_TASKS
 
 BASE_MODEL_ID  = 'Qwen/Qwen2.5-3B-Instruct'
+
+# Keep model-loading output readable by disabling noisy progress bars.
+os.environ.setdefault('HF_HUB_DISABLE_PROGRESS_BARS', '1')
+os.environ.setdefault('TQDM_DISABLE', '1')
+
+try:
+    from huggingface_hub.utils import disable_progress_bars
+    disable_progress_bars()
+except Exception:
+    pass
+
+# Suppress known non-actionable PEFT config compatibility warning.
+warnings.filterwarnings(
+    'ignore',
+    message=r'.*loading a configuration file that was saved using a higher version of the library.*',
+)
+
+
+def _log(msg: str) -> None:
+    ts = time.strftime('%H:%M:%S')
+    print(f"[{ts}] {msg}", flush=True)
 
 # LoRA adapter repos on HuggingFace Hub (~200 MB each â€” no full-model download)
 # Training script pushes adapters + tokenizer via model.push_to_hub()
@@ -398,11 +419,12 @@ def run_episode(model, tokenizer, task_id: str, max_steps: int = MAX_STEPS, verb
     }
 
 def collect_results(model_name: str, model_type: str, model, tokenizer, tasks: list, max_steps: int = MAX_STEPS):
-    import time
+    _log(f"Starting evaluation: {model_name} [{model_type}] | tasks={len(tasks)} | max_steps={max_steps}")
     print(f"\n{'='*60}\nEvaluating: {model_name} [{model_type}]  ({len(tasks)} tasks, max {max_steps} steps each)\n{'='*60}")
     results = []
     t_start = time.time()
     for task_id in tasks:
+        _log(f"Preparing environment for task '{task_id}'")
         print(f"\n  --> Task: {task_id}")
         r = run_episode(model, tokenizer, task_id, max_steps=max_steps, verbose=True)
         results.append(r)
@@ -412,6 +434,7 @@ def collect_results(model_name: str, model_type: str, model, tokenizer, tasks: l
               f"| steps={r['steps_taken']:2d} | assertions={r['assertions_passed']}/{r['assertions_total']} "
               f"| elapsed={elapsed:.0f}s | {status}")
     avg_score = sum(r['score'] for r in results) / max(1, len(results))
+    _log(f"Completed evaluation for {model_type}; average score={avg_score:.4f}")
     print(f"\n  --> Average Score: {avg_score:.4f}  |  Total elapsed: {time.time()-t_start:.0f}s\n")
     return results
 
@@ -422,22 +445,26 @@ def collect_results(model_name: str, model_type: str, model, tokenizer, tasks: l
 def _load_base(hf_kwargs: dict) -> AutoModelForCausalLM:
     """Load Qwen2.5-3B-Instruct in fp16 or 8-bit depending on USE_8BIT flag."""
     if USE_8BIT:
-        print(f"[LOAD] Base model <- {BASE_MODEL_ID}  (8-bit quantized via BitsAndBytes)")
+        _log(f"Loading base model in 8-bit: {BASE_MODEL_ID}")
         bnb_config = BitsAndBytesConfig(load_in_8bit=True)
-        return AutoModelForCausalLM.from_pretrained(
+        model = AutoModelForCausalLM.from_pretrained(
             BASE_MODEL_ID,
             device_map='auto',
             quantization_config=bnb_config,
             **hf_kwargs
         )
+        _log("Base model loaded (8-bit)")
+        return model
     else:
-        print(f"[LOAD] Base model <- {BASE_MODEL_ID}  (float16)")
-        return AutoModelForCausalLM.from_pretrained(
+        _log(f"Loading base model in float16: {BASE_MODEL_ID}")
+        model = AutoModelForCausalLM.from_pretrained(
             BASE_MODEL_ID,
             device_map='auto',
             torch_dtype=torch.float16,
             **hf_kwargs
         )
+        _log("Base model loaded (float16)")
+        return model
 
 
 def _load_lora_model(base, lora_repo: str, hf_kwargs: dict):
@@ -453,13 +480,15 @@ def _load_lora_model(base, lora_repo: str, hf_kwargs: dict):
 
     # --- Primary: HuggingFace Hub LoRA ---
     try:
-        print(f"[LOAD] LoRA tokenizer <- {lora_repo}  (latest)")
+        _log(f"Loading LoRA tokenizer: {lora_repo}")
         tokenizer = AutoTokenizer.from_pretrained(lora_repo, **hf_kwargs)
+        _log("LoRA tokenizer loaded")
 
-        print(f"[LOAD] LoRA adapters  <- {lora_repo}  (latest)")
+        _log(f"Attaching LoRA adapters: {lora_repo}")
         peft_model = PeftModel.from_pretrained(base, lora_repo, **hf_kwargs)
+        _log("LoRA adapters attached successfully")
     except Exception as exc:
-        print(f"       HF Hub LoRA load failed: {exc}")
+        _log(f"LoRA load failed for {lora_repo}: {exc}")
         tokenizer  = None
         peft_model = None
 
@@ -521,6 +550,7 @@ def main():
     # local_files_only=False: always check HF Hub for the latest commit
     hf_kwargs    = {**token_kwargs, 'local_files_only': False}
 
+    _log("Bootstrapping comparison run")
     print("="*80)
     print("Qwen2.5-3B  |  Inference Comparison  (LoRA adapter loading)")
     print(f"  Models to run : {sorted(run_models)}")
@@ -538,9 +568,10 @@ def main():
     shared_base = None
     if 'sft' in run_models or 'grpo' in run_models or 'base' in run_models:
         try:
+            _log("Starting shared base model load")
             shared_base = _load_base(hf_kwargs)
         except Exception as exc:
-            print(f"[ERROR] Shared base model load failed: {exc}")
+            _log(f"Shared base model load failed: {exc}")
             shared_base = None
 
     # ------------------------------------------------------------------ #
@@ -549,8 +580,9 @@ def main():
     if 'base' in run_models:
         if shared_base is not None:
             try:
-                print(f"\n[LOAD] Base tokenizer <- {BASE_MODEL_ID}")
+                _log("Loading base tokenizer")
                 base_tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL_ID, **hf_kwargs)
+                _log("Base tokenizer loaded; starting BASE evaluation")
 
                 shared_base.eval()
 
@@ -561,7 +593,7 @@ def main():
                 torch.cuda.empty_cache()
                 gc.collect()
             except Exception as exc:
-                print(f"[ERROR] Base model eval failed: {exc}")
+                _log(f"Base model eval failed: {exc}")
                 print("        BASE column will show SKIP in the final table.")
         else:
             print("[SKIP] Base model (shared_base load failed)")
@@ -575,6 +607,7 @@ def main():
     if 'sft' in run_models:
         if shared_base is not None:
             print(f"\n--- Loading SFT (LoRA) ---")
+            _log("Starting SFT adapter load")
             sft_model, sft_tokenizer = _load_lora_model(
                 base           = shared_base,
                 lora_repo      = SFT_LORA_REPO,
@@ -582,6 +615,7 @@ def main():
             )
             if sft_model is not None and sft_tokenizer is not None:
                 sft_model.eval()
+                _log("SFT model ready; starting SFT evaluation")
                 all_reports['SFT'] = collect_results(
                     "Qwen-SFT", "SFT", sft_model, sft_tokenizer, tasks, max_steps)
                 
@@ -591,7 +625,7 @@ def main():
                 torch.cuda.empty_cache()
                 gc.collect()
             else:
-                print(f"[ERROR] SFT model could not be loaded. SFT column will show SKIP.")
+                _log("SFT model could not be loaded. SFT column will show SKIP.")
         else:
             print("[SKIP] SFT model (shared_base load failed)")
     else:
@@ -604,6 +638,7 @@ def main():
     if 'grpo' in run_models:
         if shared_base is not None:
             print(f"\n--- Loading GRPO (LoRA) ---")
+            _log("Starting GRPO adapter load")
             grpo_model, grpo_tokenizer = _load_lora_model(
                 base           = shared_base,
                 lora_repo      = GRPO_LORA_REPO,
@@ -611,6 +646,7 @@ def main():
             )
             if grpo_model is not None and grpo_tokenizer is not None:
                 grpo_model.eval()
+                _log("GRPO model ready; starting GRPO evaluation")
                 all_reports['GRPO'] = collect_results(
                     "Qwen-GRPO", "GRPO", grpo_model, grpo_tokenizer, tasks, max_steps)
                 
@@ -619,13 +655,14 @@ def main():
                 torch.cuda.empty_cache()
                 gc.collect()
             else:
-                print("[ERROR] GRPO model could not be loaded. GRPO column will show SKIP.")
+                _log("GRPO model could not be loaded. GRPO column will show SKIP.")
         else:
             print("[SKIP] GRPO model (shared_base load failed)")
     else:
         print("[SKIP] GRPO model (not in --models)")
 
     if shared_base is not None:
+        _log("Releasing shared base model from memory")
         del shared_base
         torch.cuda.empty_cache()
         gc.collect()
