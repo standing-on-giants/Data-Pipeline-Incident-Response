@@ -19,6 +19,8 @@ Two-stage training: SFT warm-start â†’ GRPO reinforcement learning.
 ## 1. Setup
 """
 
+import subprocess
+
 !pip install -q unsloth[colab-new] trl>=0.8.6 peft accelerate bitsandbytes \
     transformers datasets pandas numpy openai python-dotenv
 print('Installation complete.')
@@ -28,17 +30,21 @@ import os
 try:
     from kaggle_secrets import UserSecretsClient
     _s = UserSecretsClient()
-    GITHUB_TOKEN = _s.get_secret('GITHUB_TOKEN')
+    GITHUB_TOKEN = _s.get_secret('META_HACKATHON_TOKEN')
     HF_TOKEN = _s.get_secret('HF_TOKEN')
 except Exception:
-    GITHUB_TOKEN = os.getenv('GITHUB_TOKEN', '')
+    GITHUB_TOKEN = os.getenv('META_HACKATHON_TOKEN', '')
     HF_TOKEN = os.getenv('HF_TOKEN', '')
+GITHUB_USERNAME = "standing-on-giants"
+
+
 
 REPO_DIR = '/kaggle/working/Meta_hackathon'
 if not os.path.exists(REPO_DIR):
-    !git clone https://{GITHUB_TOKEN}@github.com/standing-on-giants/Meta_hackathon.git {REPO_DIR}
+    subprocess.run(f"git clone -b dev/pratham https://{GITHUB_TOKEN}@github.com/standing-on-giants/Meta_hackathon.git {REPO_DIR}", shell=True)
 else:
-    !cd {REPO_DIR} && git pull
+    os.chdir(REPO_DIR)
+    subprocess.run("git fetch origin && git checkout dev/pratham && git pull origin dev/pratham", shell=True)
 # %cd {REPO_DIR}
 print(f'Working directory: {os.getcwd()}')
 
@@ -150,7 +156,7 @@ def collect_gold(task_ids=['easy','medium', 'hard', 'hard2'], n_ep=10):
         if not gold: continue
         for _ in range(n_ep):
             env = DataPipelineEnv(task_id=tid)
-            obs = env.reset()
+            obs, _ = env.reset()
             for si, ad in enumerate(gold, 1):
                 pairs.append((format_obs(obs, si), json.dumps(ad)))
                 result = env.step(PipelineAction(**ad))
@@ -249,7 +255,7 @@ def pipeline_reward_fn(completions, task_id=None, n_prior_actions=None, **kwargs
         reward = 0.3  # format bonus for valid JSON
         try:
             env = DataPipelineEnv(task_id=tid)
-            obs = env.reset()
+            obs, _ = env.reset()
 
             # Replay the known-good actions that happened before this step
             # so the environment is in the correct state for evaluation
@@ -299,7 +305,7 @@ for tid in grpo_task_ids:
     for _ in range(20):
         # Step 1 prompt — no prior actions
         env = DataPipelineEnv(task_id=tid)
-        obs = env.reset()
+        obs, _ = env.reset()
         chat = tokenizer.apply_chat_template(
             [{'role': 'system', 'content': SYSTEM_PROMPT},
              {'role': 'user',   'content': format_obs(obs, 1)}],
@@ -382,7 +388,7 @@ FLM.for_inference(model)
 
 def run_eval(model, tokenizer, task_id, max_steps=20):
     env = DataPipelineEnv(task_id=task_id)
-    obs = env.reset(); step = 0
+    obs, _ = env.reset(); step = 0
     for step in range(1, max_steps+1):
         if obs.pipeline_passed: break
         msgs = [{'role':'system','content':SYSTEM_PROMPT}, {'role':'user','content':format_obs(obs,step)}]
@@ -412,20 +418,20 @@ for tid in eval_tasks:
 
 """## 6. Push to Hub (optional)"""
 
-LOCAL_MERGED_DIR = '/kaggle/working/qwen-merged-16bit'
-print(f'Saving merged 16-bit model locally to {LOCAL_MERGED_DIR}...')
-model.save_pretrained_merged(LOCAL_MERGED_DIR, tokenizer, save_method='merged_16bit')
+# LOCAL_MERGED_DIR = '/kaggle/working/qwen-merged-16bit'
+# print(f'Saving merged 16-bit model locally to {LOCAL_MERGED_DIR}...')
+# model.save_pretrained_merged(LOCAL_MERGED_DIR, tokenizer, save_method='merged_16bit')
 
 
-from kaggle_secrets import UserSecretsClient
-_s = UserSecretsClient()
-GITHUB_TOKEN = _s.get_secret('GITHUB_TOKEN')
-HF_TOKEN = _s.get_secret('hugging_face_access_token')
+# from kaggle_secrets import UserSecretsClient
+# _s = UserSecretsClient()
+# GITHUB_TOKEN = _s.get_secret('GITHUB_TOKEN')
+# HF_TOKEN = _s.get_secret('hugging_face_access_token')
 
-HF_REPO = 'Abhinav-hf/data-pipeline-incident-qwen-grpo'
-if HF_TOKEN:
-    print(f'Pushing to {HF_REPO}...')
-    model.push_to_hub_merged(HF_REPO, tokenizer, save_method='merged_16bit', token=HF_TOKEN)
-    print(f'Done: https://huggingface.co/{HF_REPO}')
-else:
-    print('No HF_TOKEN — saved locally only.')
+# HF_REPO = 'Abhinav-hf/data-pipeline-incident-qwen-grpo'
+# if HF_TOKEN:
+#     print(f'Pushing to {HF_REPO}...')
+#     model.push_to_hub_merged(HF_REPO, tokenizer, save_method='merged_16bit', token=HF_TOKEN)
+#     print(f'Done: https://huggingface.co/{HF_REPO}')
+# else:
+#     print('No HF_TOKEN — saved locally only.')
