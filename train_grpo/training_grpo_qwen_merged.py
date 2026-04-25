@@ -211,6 +211,20 @@ print(f'SFT done. Loss: {sft_stats.training_loss:.4f}')
 model.save_pretrained(SFT_DIR)
 tokenizer.save_pretrained(SFT_DIR)
 
+HF_REPO = 'Abhinav-hf/qwen-grpo-sft-trained-16bit'
+
+# Fixing config serialization bug for Unsloth before pushing
+model.config.__dict__ = {
+    k: v for k, v in model.config.__dict__.items()
+    if not callable(v)
+}
+
+if HF_TOKEN:
+    print(f'Pushing seamlessly compiled SFT 16-bit model to Hub: {HF_REPO}')
+    model.push_to_hub_merged(HF_REPO, tokenizer, save_method='merged_16bit', token=HF_TOKEN)
+    print(f'SFT Hub upload complete. GRPO will now commence and overwrite the main weights once finished.')
+else:
+    print('No HF_TOKEN detected — skipping SFT Hub upload.')
 
 # ==============================================================================
 # 4. REINFORCEMENT LEARNING ON ENVIRONMENT (GRPO) - STAGE 2
@@ -331,14 +345,16 @@ grpo_config = GRPOConfig(
     num_generations=4,
     max_completion_length=200,
     temperature=0.8,
+    do_sample=True,
     per_device_train_batch_size=1,
     gradient_accumulation_steps=4,
+    dataloader_num_workers=2,
     num_train_epochs=2,
     learning_rate=5e-5,
-    fp16=not is_bfloat16_supported(),
-    bf16=is_bfloat16_supported(),
+    fp16=True,
+    bf16=False,
     # Beta acts as a strongly anchored tether to the SFT training rules
-    beta=0.2,
+    beta=0.5,
     loss_type='grpo',
     logging_steps=1,
     save_steps=50,
@@ -347,6 +363,10 @@ grpo_config = GRPOConfig(
     max_grad_norm=1.0,
     warmup_steps=1,
 )
+
+from peft import prepare_model_for_kbit_training
+model = prepare_model_for_kbit_training(model)
+model.gradient_checkpointing_enable()
 
 grpo_trainer = GRPOTrainer(
     model=model,
@@ -368,9 +388,9 @@ tokenizer.save_pretrained(GRPO_DIR)
 # 5. EXPORT / PUSH TO HUGGINGFACE HUB
 # ==============================================================================
 LOCAL_MERGED_DIR = '/kaggle/working/qwen-merged-16bit'
-print(f'Saving completely merged 16-bit model locally to {LOCAL_MERGED_DIR}...')
+print(f'Saving completely merged 16-bit GRPO model locally to {LOCAL_MERGED_DIR}...')
 
-# Fixing config serialization bug before merge
+# Apply config object filtering again just to be safe
 model.config.__dict__ = {
     k: v for k, v in model.config.__dict__.items()
     if not callable(v)
@@ -381,10 +401,10 @@ model.save_pretrained_merged(
     tokenizer,
     save_method='merged_16bit'
 )
-HF_REPO = 'Abhinav-hf/data-pipeline-incident-qwen-grpo'
+HF_REPO = 'Abhinav-hf/qwen-grpo-complete-trained-16bit'
 if HF_TOKEN:
-    print(f'Pushing seamlessly compiled model to Hub: {HF_REPO}')
+    print(f'Pushing seamlessly compiled GRPO model to Hub: {HF_REPO}')
     model.push_to_hub_merged(HF_REPO, tokenizer, save_method='merged_16bit', token=HF_TOKEN)
-    print(f'Done! Model available at: https://huggingface.co/{HF_REPO}')
+    print(f'Done! Final GRPO Model available at: https://huggingface.co/{HF_REPO}')
 else:
     print('No HF_TOKEN detected — skipping Hub upload. Local save complete.')
