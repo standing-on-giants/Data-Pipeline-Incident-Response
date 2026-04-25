@@ -18,7 +18,7 @@ LOCAL_GRPO_LORA  = '/kaggle/working/lora_adapters'
 # LoRA adapter repos on HuggingFace Hub (lightweight — ~200 MB each vs 6 GB merged)
 # The training script saves adapters + tokenizer via model.save_pretrained() / push_to_hub()
 SFT_LORA_REPO    = 'Abhinav-hf/qwen-grpo-sft-trained-16bit'      # SFT LoRA adapter hub repo
-GRPO_LORA_REPO   = 'Abhinav-hf/qwen-grpo-complete-trained-16bit'     # GRPO LoRA adapter hub repo
+GRPO_LORA_REPO   = 'Abhinav-hf/qwen-grpo-lora-adapters'     # GRPO LoRA adapter hub repo
 
 try:
     from kaggle_secrets import UserSecretsClient
