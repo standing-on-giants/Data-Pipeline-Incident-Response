@@ -250,3 +250,11 @@ for credit assignment in a 20-step episode.
 **Tradeoff:** Models are loaded sequentially and unloaded strictly to save VRAM, impacting total evaluation runtime slightly but maximizing safety on 15GB T4 constraints.
 
 ---
+
+### 4/25/2026 - GRPO Hardware & Config Decisions
+
+- DECISION: Keep 8-bit quantization for training (VRAM constraint on T4 15.6GB). Export as merged 16-bit for inference. This is the correct tradeoff.
+- DECISION: n=4 generations per prompt in GRPO (T4 memory constraint). Would prefer n=8 but not feasible.
+- DECISION: SFT and GRPO are now separated into distinct notebook cells so GRPO can be re-run independently without re-running SFT.
+- DECISION: Remove EarlyStoppingCallback entirely rather than fight Unsloth 8-bit compatibility. 2 epochs is sufficient overfitting protection with reduced LR.
+- PENDING DECISION: GRPO reward collapse fix — options being evaluated: (a) reduce LR 5e-5->1e-5, (b) add cosine LR scheduler, (c) increase warmup steps, (d) soften invalid JSON penalty from -0.3 to -0.1 for near-misses, (e) reduce max_grad_norm 1.0->0.3.

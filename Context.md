@@ -75,3 +75,13 @@ Meta PyTorch OpenEnv Hackathon — Round 2 Grand Finale
 | hard2  | ~0.88*          | ~0.30                    |
 
 *Gemini hits max_steps on hard2 without fully passing — real training delta available.
+
+### 4/25/2026 GRPO Project State Update
+
+- Model: Qwen/Qwen2.5-3B-Instruct, 8-bit, LoRA r=32, alpha=32
+- Hardware: Kaggle T4, 15.6GB VRAM
+- SFT: 250 gold examples across 4 task difficulties (easy/medium/hard/hard2), 2 epochs, LR=1e-4, loss converging to ~1.57 (healthy)
+- GRPO: 120 prompts (hard + hard2 tasks, 3 step-levels each, 20 repeats), 2 epochs = 240 steps, beta=0.5, temperature=0.8
+- Current GRPO status: reward collapsed after step 50. KL well-controlled (0–2.1). Sampling working (reward_std > 0 most steps). Problem is LR too high + no warmup causing drift to invalid JSON outputs.
+- Reward function: +0.3 format bonus, +env reward, +0.2 per extra assertion passed, +0.3 for compare_schema finding diffs. Penalty -0.3 for invalid JSON.
+- Next action: implement LR and warmup fixes in GRPO config (see decisions.md).
