@@ -14,13 +14,25 @@ print("--- Starting Setup & Installation ---")
 
 subprocess.run(
     "pip install -qU --no-cache-dir unsloth unsloth_zoo transformers trl peft accelerate "
-    "bitsandbytes datasets pandas openai python-dotenv", 
+    "bitsandbytes datasets pandas openai python-dotenv",
     shell=True, check=True
 )
 
 subprocess.run("rm -rf /kaggle/working/unsloth_compiled_cache", shell=True)
 subprocess.run("rm -rf /kaggle/working/Meta_hackathon/unsloth_compiled_cache", shell=True)
 print('Installation and Cache Clearance complete.')
+
+# ✅ PATCH GOES HERE — after pip install, before anything else
+import transformers.configuration_utils as _tcu
+_orig_dumps = json.dumps
+def _safe_dumps(obj, **kw):
+    class SafeEncoder(json.JSONEncoder):
+        def default(self, o):
+            return None if callable(o) else super().default(o)
+    kw['cls'] = SafeEncoder
+    return _orig_dumps(obj, **kw)
+_tcu.json.dumps = _safe_dumps
+print("JSON encoder patched.")
 
 try:
     from kaggle_secrets import UserSecretsClient
@@ -42,10 +54,19 @@ print(f"GITHUB_TOKEN loaded: {'YES' if GITHUB_TOKEN else 'NO'}")
 REPO_DIR = '/kaggle/working/Meta_hackathon'
 
 if not os.path.exists(REPO_DIR):
-    subprocess.run(f"git clone -b dev/pratham https://{GITHUB_TOKEN}@github.com/standing-on-giants/Meta_hackathon.git {REPO_DIR}", shell=True)
+    subprocess.run(
+        f"git clone -b dev/pratham https://{GITHUB_TOKEN}@github.com/"
+        f"standing-on-giants/Meta_hackathon.git {REPO_DIR}",
+        shell=True, check=True
+    )
 else:
-    os.chdir(REPO_DIR)
-    subprocess.run("git fetch origin && git checkout dev/pratham && git pull origin dev/pratham", shell=True)
+    subprocess.run(
+        "git fetch origin && "
+        "git checkout -- src/__pycache__/ && "  # discard pycache conflicts
+        "git checkout dev/pratham && "
+        "git pull origin dev/pratham",
+        shell=True, cwd=REPO_DIR
+    )
 
 os.chdir(REPO_DIR)
 sys.path.insert(0, REPO_DIR)
@@ -90,6 +111,25 @@ model = FastLanguageModel.get_peft_model(
 trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
 total = sum(p.numel() for p in model.parameters())
 print(f'Trainable Parameters: {trainable/1e6:.1f}M / {total/1e9:.2f}B ({100*trainable/total:.2f}%)')
+
+# === SMOKE TEST: Verify save works before training ===
+import shutil
+print("Running Smoke Test for Model Saves...")
+try:
+    model.save_pretrained('/kaggle/working/_smoke_test_lora')
+    model.save_pretrained_merged('/kaggle/working/_smoke_test_merged', tokenizer, save_method='merged_16bit')
+    
+    # Verify config.json is valid
+    with open('/kaggle/working/_smoke_test_merged/config.json', 'r') as f:
+        json.loads(f.read())
+        
+    print("Smoke test PASSED — safe to proceed.")
+    shutil.rmtree('/kaggle/working/_smoke_test_lora', ignore_errors=True)
+    shutil.rmtree('/kaggle/working/_smoke_test_merged', ignore_errors=True)
+except Exception as e:
+    import traceback
+    traceback.print_exc()
+    raise RuntimeError(f"Smoke Test FAILED: {e}")
 
 # ==============================================================================
 # 3. SUPERVISED FINE-TUNING (SFT) - STAGE 1
@@ -184,26 +224,37 @@ sft_texts = [
     for obs, act in gold_pairs
 ]
 sft_ds = Dataset.from_dict({'text': sft_texts})
+sft_ds_split = sft_ds.train_test_split(test_size=0.1, seed=42)
 
 SFT_DIR = '/kaggle/working/sft_qwen'
 
 # Extreme VRAM preservation applied to SFT
 print('--- Starting SFT ---')
+# from transformers import EarlyStoppingCallback
+
 sft_trainer = SFTTrainer(
     model=model, tokenizer=tokenizer,
-    train_dataset=sft_ds, dataset_text_field='text',
+    train_dataset=sft_ds_split['train'],
+    eval_dataset=sft_ds_split['test'],
+    dataset_text_field='text',
     max_seq_length=MAX_SEQ_LENGTH,
+    # callbacks=[EarlyStoppingCallback(early_stopping_patience=3)],
     args=TrainingArguments(
         average_tokens_across_devices=False,
         per_device_train_batch_size=1,       
         gradient_accumulation_steps=8,       
-        num_train_epochs=5,
-        warmup_ratio=0.1, learning_rate=2e-4,
+        num_train_epochs=2,
+        eval_strategy='steps',
+        eval_steps=20,
+        # load_best_model_at_end=True,
+        # metric_for_best_model='eval_loss',
+        warmup_ratio=0.1, 
+        learning_rate=1e-4,
         fp16=not is_bfloat16_supported(),
         bf16=is_bfloat16_supported(),
         logging_steps=5, optim='adamw_8bit',
-        weight_decay=0.01, lr_scheduler_type='cosine',
-        output_dir=SFT_DIR, save_steps=50, seed=42,
+        weight_decay=0.05, lr_scheduler_type='cosine',
+        output_dir=SFT_DIR, save_steps=40, seed=42,
     ),
 )
 sft_stats = sft_trainer.train()
@@ -212,12 +263,6 @@ model.save_pretrained(SFT_DIR)
 tokenizer.save_pretrained(SFT_DIR)
 
 HF_REPO = 'Abhinav-hf/qwen-grpo-sft-trained-16bit'
-
-# Fixing config serialization bug for Unsloth before pushing
-model.config.__dict__ = {
-    k: v for k, v in model.config.__dict__.items()
-    if not callable(v)
-}
 
 if HF_TOKEN:
     print(f'Pushing seamlessly compiled SFT 16-bit model to Hub: {HF_REPO}')
@@ -345,7 +390,7 @@ grpo_config = GRPOConfig(
     num_generations=4,
     max_completion_length=200,
     temperature=0.8,
-    do_sample=True,
+    # do_sample=True,
     per_device_train_batch_size=1,
     gradient_accumulation_steps=4,
     dataloader_num_workers=2,
@@ -357,7 +402,7 @@ grpo_config = GRPOConfig(
     beta=0.5,
     loss_type='grpo',
     logging_steps=1,
-    save_steps=50,
+    save_steps=40,
     seed=42,
     max_prompt_length=MAX_SEQ_LENGTH,
     max_grad_norm=1.0,
@@ -387,14 +432,9 @@ tokenizer.save_pretrained(GRPO_DIR)
 # ==============================================================================
 # 5. EXPORT / PUSH TO HUGGINGFACE HUB
 # ==============================================================================
+
 LOCAL_MERGED_DIR = '/kaggle/working/qwen-merged-16bit'
 print(f'Saving completely merged 16-bit GRPO model locally to {LOCAL_MERGED_DIR}...')
-
-# Apply config object filtering again just to be safe
-model.config.__dict__ = {
-    k: v for k, v in model.config.__dict__.items()
-    if not callable(v)
-}
 
 model.save_pretrained_merged(
     LOCAL_MERGED_DIR,
