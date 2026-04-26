@@ -33,7 +33,7 @@ def _log(msg: str) -> None:
 # LoRA adapter repos on HuggingFace Hub (~200 MB each â€” no full-model download)
 # Training script pushes adapters + tokenizer via model.push_to_hub()
 SFT_LORA_REPO  = 'Abhinav-hf/qwen-sft-lora-adapter'
-GRPO_LORA_REPO = 'Abhinav-hf/qwen-grpo-complete-trained-16bit'       # GRPO LoRA adapter repo
+GRPO_LORA_REPO = 'Abhinav-hf/qwen-grpo-lora-adapter'       # GRPO LoRA adapter repo
 
 # â”€â”€ Optional: load base model in 8-bit to save VRAM (~4 GB vs ~6 GB fp16) â”€â”€
 # Set USE_8BIT=True when running on T4/16 GB to avoid OOM.

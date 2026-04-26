@@ -14,7 +14,7 @@ We built **Data Pipeline Incident Response — OpenEnv**, a fully interactive in
 **The twist:** We injected *dynamic, mid-episode schema drift*. As the agent applies fixes, the upstream API mutates again in real-time, forcing the agent to detect and adapt to live contract changes rather than just solving a static puzzle.
 
 ### 3. What did the agent learn? (The GRPO / Qwen Journey)
-At first, smaller models like Qwen 1.5B/3B and LLaMA 3.1 8B failed completely. They would hallucinate fixes without looking at the data, get stuck in infinite loops of repeating the same action, or blindly sweep errors under the rug.
+At first, smaller models like Qwen 1.5B/3B failed completely. They would hallucinate fixes without looking at the data, get stuck in infinite loops of repeating the same action, or blindly sweep errors under the rug.
 
 To fix this, we used **Group Relative Policy Optimization (GRPO)** and aggressive reward shaping. We penalized the agent severely for "blind fixes" (-0.5 reward) or repeating the same action without progress. We rewarded it for correctly diagnosing drift and passing the pipeline. 
 

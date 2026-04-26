@@ -3,7 +3,7 @@ import os
 import logging
 from typing import Any, Dict, Optional
 
-from fastapi import FastAPI, HTTPException, Body
+from fastapi import FastAPI, HTTPException, Body, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -87,7 +87,8 @@ def reset(req: Optional[ResetRequest] = Body(default=None)):
 def step(body: Dict[str, Any] = Body(...)):
     global current_session_id
 
-    session_id = body.pop("session_id", None) or current_session_id
+    payload = dict(body)
+    session_id = payload.pop("session_id", None) or current_session_id
 
     if session_id is None:
         raise HTTPException(status_code=400, detail="Call /reset first")
@@ -97,7 +98,11 @@ def step(body: Dict[str, Any] = Body(...)):
         raise HTTPException(status_code=404, detail="Session not found")
 
     try:
-        action = PipelineAction(**body)
+        # Accept both shapes:
+        # 1) {"action_type": "...", "params": {...}}
+        # 2) {"action": {"action_type": "...", "params": {...}}}
+        action_payload = payload.get("action") if isinstance(payload.get("action"), dict) else payload
+        action = PipelineAction(**action_payload)
     except Exception as e:
         raise HTTPException(status_code=422, detail=str(e))
 
@@ -111,8 +116,90 @@ def step(body: Dict[str, Any] = Body(...)):
     return {
         "observation": result.observation.model_dump(),
         "reward": result.reward,
-        "done": result.done
+        "done": result.done,
+        "terminated": result.terminated,
+        "truncated": result.truncated,
     }
+
+
+# ---------------- WEBSOCKET ---------------- #
+
+@app.websocket("/ws")
+async def websocket_env(websocket: WebSocket):
+    global current_session_id
+
+    await websocket.accept()
+    logger.info("[WS] client connected")
+
+    try:
+        while True:
+            msg = await websocket.receive_json()
+            action = msg.get("action")
+
+            # reset path: {"action":"reset", "task_id":"easy"}
+            if action == "reset":
+                task_id = msg.get("task_id", "easy")
+                env = DataPipelineEnv(task_id=task_id)
+                session_id = f"{task_id}_{id(env)}"
+                _sessions[session_id] = env
+                current_session_id = session_id
+                obs, _ = env.reset()
+
+                await websocket.send_json({
+                    "session_id": session_id,
+                    "observation": obs.model_dump(),
+                    "reward": 0.0,
+                    "done": False,
+                    "terminated": False,
+                    "truncated": False,
+                    "info": {"message": "Environment reset"},
+                })
+                continue
+
+            # state path: {"action":"state", "session_id":"..."}
+            if action == "state":
+                session_id = msg.get("session_id") or current_session_id
+                if session_id is None or session_id not in _sessions:
+                    await websocket.send_json({"error": "Call reset first"})
+                    continue
+                await websocket.send_json(_sessions[session_id].state())
+                continue
+
+            # step path:
+            # {"action": {"action_type":"...", "params": {...}}, "session_id":"..."}
+            session_id = msg.get("session_id") or current_session_id
+            if session_id is None or session_id not in _sessions:
+                await websocket.send_json({"error": "Call reset first"})
+                continue
+
+            env = _sessions[session_id]
+
+            try:
+                action_payload = action if isinstance(action, dict) else msg
+                action_obj = PipelineAction(**action_payload)
+            except Exception as exc:
+                await websocket.send_json({"error": f"Invalid action payload: {exc}"})
+                continue
+
+            result = env.step(action_obj)
+            await websocket.send_json({
+                "session_id": session_id,
+                "observation": result.observation.model_dump(),
+                "reward": result.reward,
+                "done": result.done,
+                "terminated": result.terminated,
+                "truncated": result.truncated,
+                "info": result.info,
+            })
+
+    except WebSocketDisconnect:
+        logger.info("[WS] client disconnected")
+    except Exception as exc:
+        logger.exception(f"[WS] unexpected server error: {exc}")
+        try:
+            await websocket.send_json({"error": str(exc)})
+        except Exception:
+            pass
 
 
 # ---------------- STATE ---------------- #
