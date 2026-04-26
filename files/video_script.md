@@ -6,6 +6,8 @@
 
 ---
 
+We're team alphazero, and our team consists of me (Shashank), Abhinav and Pratham
+
 ### [0:00–0:15] THE CAPABILITY GAP (Storytelling Hook)
 **NARRATION:**  
 "When a data pipeline breaks at 3 AM, an engineer reads logs, inspects schemas, applies patches, and reruns the pipeline until the board is green. It's fully reactive. We built the OpenEnv 'Data Pipeline Incident Response' environment to train LLMs to do exactly that autonomously."

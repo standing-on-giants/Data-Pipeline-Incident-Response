@@ -1,173 +1,181 @@
-# From 2 AM Pipeline Failures to Adaptive RL Agents
+#  Teaching an AI to Be the Engineer You Page at 3 AM
 
-Meta OpenEnv Hackathon India 2026 - Round 2 submission by Team [Your Team Name]
+## *We built an RL environment where a 3B model learns to fix broken data pipelines in real-time — including ones that keep breaking while it's fixing them.*
 
-## TL;DR
+**Meta PyTorch OpenEnv Hackathon · Round 2 · Team alphazero**  
+**Shashank · Abhinav · Pratham**
 
-We built an OpenEnv-compliant environment where an LLM acts like an on-call data engineer. The agent receives failing pipeline alerts, investigates the cause, applies targeted fixes, reruns the pipeline, and handles live schema drift injected mid-episode.
+---
 
-This project is primarily aligned with Theme 3.1 (World Modeling: Professional Tasks), with a secondary alignment to Theme 2 (Long-Horizon Planning), because the world changes while the agent is already fixing it.
+> It's 3 AM. Your phone buzzes. The finance dashboard is red. 
+> The Slack bot is screaming.
 
-## The problem we chose
+![A production pipeline alert firing in Slack — 1/6 tests failing, 1/24 assertions broken.](images/slack_failure.png)
 
-Real data pipelines fail constantly in production:
+*Every data engineer has seen this exact screen.*
 
-- Columns get renamed without notice
-- Numeric fields arrive as strings like "$1,234" or "N/A"
-- Join keys silently change format
-- Duplicate events appear from API retries
+The upstream vendor quietly changed their API schema. `spend` is now `"$1,234.00"` instead of `1234.0`. A column got renamed. Twenty duplicate rows snuck in from a retry storm. And now your entire ROAS pipeline is returning `-inf` for every campaign.
 
-Most teams still solve this manually in incident mode. We wanted an agent that can follow a disciplined incident workflow instead of guessing.
+The old solution? Wake up a human. Make them dig through logs, write SQL, hotfix the ETL, rerun, pray.
 
-## The environment we built
+**Our solution?** Train an AI to do it instead.
 
-Environment name: Data Pipeline Incident Response (OpenEnv)
+---
 
-The agent operates over a DAG-style pipeline and receives:
+## What We Built
 
-- Failing/passing data quality assertions
-- Historical run info
-- Current vs historical schema (after inspection actions)
-- Step-by-step action history
+We created **Data Pipeline Incident Response** — a fully interactive RL environment where an AI agent gets dropped into a broken pipeline and has to diagnose and fix it, step by step, using the exact same tools a data engineer would use.
 
-### Action space (11 typed actions)
+No cheating. No pre-loaded answers. Just a broken pipeline, a set of tools, and the pressure to get it green.
 
-Examples:
+Here's what the pipeline the agent has to fix looks like:
 
-- read_data_sample
-- check_schema
-- compare_schema
-- handle_drift
-- add_data_filter
-- patch_transformation
-- run_pipeline
-- alert_upstream_team
+![The pipeline DAG the agent operates on — raw data flows through transform steps into cleaned output tables.](images/dag.png)
 
-### Why this is not a toy benchmark
+*The agent can see this DAG, but it can't see what's wrong with it. It has to investigate.*
 
-The environment is partially observable and tool-driven. The model cannot pass by pure text pattern matching. It must call the right diagnostic tools, patch the right transformation step, then validate by rerunning the pipeline.
+Raw tables flow through transformation steps into clean output tables. Somewhere in that flow, something broke. Multiple *somethings*, in the harder tasks. The agent's job is to figure out what, not guess.
 
-## What makes Round 2 novel in our setup
+---
 
-The hard2 task includes dynamic drift scheduled during run_pipeline:
+## The Tools (The Part That Makes This Hard)
 
-1. spend -> total_spend rename
-2. auth format rotation
-3. tighter rate limit behavior
+The agent has 11 structured actions available to it. Each one maps to a real thing a data engineer actually does on an incident call:
 
-So even if the model starts with a correct plan, the world shifts. The agent must re-check schemas and adapt policy mid-trajectory.
+![The 11 action types available to the agent, categorized by Diagnosis, Remediation, and Escalation.](images/actions.png)
 
-This is exactly the kind of persistent world-model behavior we wanted to train.
+The key insight — and what makes this environment genuinely hard — is the **blind-fix penalty**.
 
-## Theme mapping
+If the agent tries to patch something without first *reading the data*, it gets a **−0.5 reward hit**. Hard. Every time.
 
-Primary:
+This single design decision eliminates an entire failure mode. Zero-shot LLMs love to guess. They'll confidently call `patch_transformation(dedup, event_id)` on Step 1 without ever looking at the data. That's not engineering. That's vibes-based debugging. We punish it.
 
-- Theme 3.1 - World Modeling (Professional Tasks)
+The only way to score big is to act like a real on-call engineer:
 
-Secondary:
+```
+1. read_data_sample()      ← look at the data first!
+2. compare_schema()        ← check if the API changed
+3. patch_transformation()  ← now apply the fix
+4. run_pipeline()          ← validate it worked
+```
 
-- Theme 2 - Long-Horizon Planning and Instruction Following
+Miss step 1? Penalty. Try to `mark_acceptable` on a failing assertion to sweep it under the rug? **−1.0 penalty.** The reward function is designed to be un-gameable.
 
-Reason:
+---
 
-- Professional because it mirrors real incident response in data engineering
-- Long-horizon because delayed reward and sequential dependencies matter (diagnose -> patch -> rerun -> re-diagnose)
+## The Twist: The World Changes While You're Fixing It
 
-## Training pipeline
+Easy and medium tasks are relatively clean — one or two faults, inspect and patch. But our hardest task (`hard2`) has a villain move we're quite proud of.
 
-We used a two-stage pipeline:
+After the agent makes its first round of fixes and calls `run_pipeline`... **the upstream API mutates again.** Mid-episode. Without warning.
 
-1. SFT stage
+- Run 2: `spend` gets silently renamed to `total_spend`
+- Run 3: Auth token format rotates to `Bearer-v2`
+- Run 4: Rate limit drops to 1 call per window
 
-- Collect successful trajectories on easier tasks
-- Teach format discipline and basic diagnostic behavior
+The agent must continuously call `compare_schema` to catch these mutations and adapt its strategy on the fly. If it doesn't notice — if it just tries to patch the old column name — it gets nothing.
 
-2. GRPO stage
+This forces what we call *behavioral persistence*: the agent has to model the world, not just memorize a solution sequence.
 
-- Train on hard/hard2 with shaped rewards
-- Encourage behaviors like schema inspection before patching and adaptive handling of drift
+---
 
-Training stack:
+## Training: From Chaos to Discipline
 
-- Unsloth + HF TRL (GRPO)
-- OpenEnv environment loop for reward generation
+We trained **Qwen2.5-3B-Instruct** using a two-stage SFT → GRPO pipeline on a single Kaggle T4 GPU.
 
-## Reward design (what we optimized for)
+### Stage 1: Teaching it to not be chaotic
 
-Core rewards include:
+Zero-shot, the model would:
+- Hallucinate actions that don't exist (`"action_type": "alert_owner"`)
+- Return invalid JSON half the time
+- Repeat the same failing action in a loop
+- Apply patches without reading any data first
 
-- Positive reward when failing assertions become passing after run_pipeline
-- Penalty for regressions
-- Reward for correct escalation only when required
-- Penalty for blind fixes and non-progress loops
+We collected ~1,600 expert (observation, action) pairs by replaying gold trajectories through the live environment and fine-tuned on those. This is the SFT stage — teaching the model *format discipline* and the basic diagnostic workflow.
 
-Design principle:
-Reward should reflect professional incident hygiene, not just terminal pass/fail.
+### Stage 2: GRPO — Learning from the Environment
 
-## Observable improvement (what we will show judges)
+After SFT, we ran GRPO: the model generates actions, the live environment executes them and hands back real rewards, and the policy updates. No static dataset. The environment *is* the training signal.
 
-We evaluate baseline vs trained policy on easy/medium/hard/hard2:
+Here's how the training went:
 
-- Per-task scores
-- Average score
-- Before/after trajectories on hard2
+![GRPO training reward curve — Episode Total Reward over 250 episodes, raw (light green) and smoothed (dark green).](images/training_plots.png)
 
-In our runs, untrained models tend to:
+*Yes, those rewards are negative at the start. That's the point.* Early on, the model is still making rookie mistakes — blind patches, looping, invalid JSON. As training progresses, the smoothed reward trend climbs from around −0.85 toward −0.65, showing the model is steadily unlearning the bad habits.
 
-- Guess patches without reading data
-- Loop on repeated actions
-- Miss post-drift rename handling
+We also built in some stability guardrails:
+- If >25 out of the first 30 GRPO episodes fail to produce valid JSON, training automatically reverts to SFT weights (saves training runs from dying to reward collapse)
+- A "best checkpoint" tracker saves the adapter weights at peak rolling average reward, not just the final epoch
 
-After training, policies become more procedural:
+---
 
-- Inspect first
-- Patch with better ordering
-- Re-validate and adapt when drift appears
+## The Results
 
-## Why this matters beyond the hackathon
+Here's the vibe shift between zero-shot and trained:
 
-This maps directly to enterprise needs:
+**Before training (zero-shot):**
+```
+Step 1 → {"action_type": "alert_owner", "params": {}}
+         ❌ ERROR: Unknown action. Reward: -0.5
 
-- Faster incident triage
-- Lower analyst/on-call load
-- Better guardrails against silent data corruption
+Step 2 → {"action_type": "alert_owner", "params": {}}
+         ❌ Same mistake again. Reward: -0.5
 
-The same design pattern can extend to:
+... (episode ends, score: 0.01)
+```
 
-- ETL reliability assistants
-- Monitoring-triggered remediation agents
-- Data contract change management workflows
+**After GRPO training:**
+```
+Step 1 → read_data_sample(raw_ads_insights, 20)      ✅ inspect first
+Step 2 → compare_schema(raw_ads_insights)             ✅ check for drift
+Step 3 → patch_transformation(parse_currency, spend)  ✅ fix type
+Step 4 → patch_transformation(dedup, event_id)        ✅ remove duplicates
+Step 5 → run_pipeline()
+         ✅ H1, H3, H4 now passing. Reward: +1.2
+```
 
-## OpenEnv compliance and artifacts
+The model went from chaotic JSON hallucinator to methodical, sequential debugger. On medium tasks, it hits **100% solve rate**. On hard tasks, meaningful improvement with more compute clearly on the table.
 
-Minimum requirements covered:
+---
 
-- OpenEnv-compatible environment and server
-- Minimal training script/notebook using Unsloth/HF TRL
-- This mini-blog for the submission
-- Environment intended to be hosted on Hugging Face Spaces
+## The Adapters
 
-## Quick demo narrative (for a <2 min video)
+We publish LoRA-only adapters (~200 MB, not 6 GB merged weights). You can load either like this:
 
-1. Start at failing assertions on hard2
-2. Show agent reading sample/schema before patching
-3. Show first repair and run_pipeline
-4. Show new drift event appears
-5. Show compare_schema + handle_drift usage
-6. End with improved assertion pass count and final report
+```python
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from peft import PeftModel
 
-## Links (replace before publishing)
+base = AutoModelForCausalLM.from_pretrained("Qwen/Qwen2.5-3B-Instruct", device_map="auto")
+model = PeftModel.from_pretrained(base, "Abhinav-hf/qwen-grpo-lora-adapter")
+tokenizer = AutoTokenizer.from_pretrained("Abhinav-hf/qwen-grpo-lora-adapter")
+```
 
-- Environment repo: [Add GitHub/HF link]
-- HF Space URL: [Add Space URL]
-- Training notebook: [Add notebook link]
-- Demo video (optional): [Add YouTube link]
+| Adapter | Repo |
+|---|---|
+| SFT (format discipline) | [`Abhinav-hf/qwen-sft-lora-adapter`](https://huggingface.co/Abhinav-hf/qwen-sft-lora-adapter) |
+| GRPO (environment-trained) | [`Abhinav-hf/qwen-grpo-lora-adapter`](https://huggingface.co/Abhinav-hf/qwen-grpo-lora-adapter) |
 
-## Team
+---
 
-- [Name 1]
-- [Name 2]
-- [Name 3]
+## Why We Think This Matters
 
-If you are building LLM agents for real operations, we'd love to collaborate.
+Data engineering is one of those jobs that is *extremely* well-defined in terms of process, but *extremely* poorly served by current AI tools. The steps are known. The failure modes are known. The fix patterns are known. What was missing was an environment that forces an agent to actually follow the process, rather than guess.
+
+The domain is underexplored in RL training, the reward signal is genuinely hard to game, and the `hard2` dynamic drift task is the kind of thing that a researcher could write a paper about.
+
+We think we've built the foundation for the fully autonomous Level-1 on-call data engineer. The model is still learning — but it's learning the right things, in the right order, for the right reasons.
+
+---
+
+## Links
+
+- 🔗 **Environment Repo:** [github.com/standing-on-giants/Meta_hackathon](https://github.com/standing-on-giants/Meta_hackathon)
+- 🤗 **SFT Adapter:** [Abhinav-hf/qwen-sft-lora-adapter](https://huggingface.co/Abhinav-hf/qwen-sft-lora-adapter)
+- 🤗 **GRPO Adapter:** [Abhinav-hf/qwen-grpo-lora-adapter](https://huggingface.co/Abhinav-hf/qwen-grpo-lora-adapter)
+- 📓 **Training Notebook:** `train_grpo/train_grpo_qwen_merged.ipynb`
+
+---
+
+**Team alphazero** — Shashank · Abhinav · Pratham  
+*Meta PyTorch OpenEnv Hackathon India 2026 · Round 2*
