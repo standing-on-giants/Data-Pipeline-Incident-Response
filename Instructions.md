@@ -94,3 +94,8 @@ This file is the source of rules for this workspace.
 - save_steps must always be an exact multiple of eval_steps.
 - Always run the smoke test cell before any training to catch save errors early.
 - To reload from SFT checkpoint for GRPO, use FastLanguageModel.from_pretrained(model_name=SFT_DIR, load_in_8bit=True) then re-apply get_peft_model() with the same LoRA config.
+
+- Episode rollout must be done with model.eval() + torch.no_grad() to avoid OOM during trajectory collection.
+- After rollout, switch back to model.train() for the gradient update.
+- Conversation context per step = system prompt + interleaved user (observation) and assistant (action) turns for all prior steps.
+- parse_action() must be called on each generated token sequence — if it returns None, the episode terminates early with a large penalty (-0.5) added to that step's reward.

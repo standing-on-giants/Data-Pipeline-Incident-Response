@@ -98,3 +98,7 @@ Meta PyTorch OpenEnv Hackathon — Round 2 Grand Finale
 - Current GRPO status: reward collapsed after step 50. KL well-controlled (0–2.1). Sampling working (reward_std > 0 most steps). Problem is LR too high + no warmup causing drift to invalid JSON outputs.
 - Reward function: +0.3 format bonus, +env reward, +0.2 per extra assertion passed, +0.3 for compare_schema finding diffs. Penalty -0.3 for invalid JSON.
 - Next action: implement LR and warmup fixes in GRPO config (see decisions.md).
+
+- Architecture: Episode GRPO. Model generates up to max_steps=10 actions per episode. Each action is parsed, stepped through DataPipelineEnv, and the trajectory reward is computed at episode end.
+- The full conversation history (system prompt + all prior observations + all prior actions) is passed as context at each step within an episode so the model can condition on history.
+- VRAM strategy: generate episodes in inference mode (no grad), then compute GRPO loss on the collected trajectories. This is the standard GRPO/PPO pattern for LLMs.

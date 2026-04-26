@@ -283,6 +283,8 @@ else:
 # ==============================================================================
 # 4. REINFORCEMENT LEARNING ON ENVIRONMENT (GRPO) - STAGE 2
 # ==============================================================================
+import os
+os.environ['PYTORCH_ALLOC_CONF'] = 'expandable_segments:True'
 from src.models import PipelineAction, PipelineObservation
 
 def parse_action(text):
@@ -299,151 +301,243 @@ def parse_action(text):
     except: pass
     return None
 
-RECONSTRUCTION_ACTIONS = [
-    PipelineAction(action_type='read_data_sample',
-                   params={'table': 'raw_ads_insights', 'n_rows': 20}),
-    PipelineAction(action_type='compare_schema',
-                   params={'table': 'raw_ads_insights'}),
-]
-
-def pipeline_reward_fn(completions, task_id=None, n_prior_actions=None, **kwargs):
-    rewards = []
-
-    task_ids = task_id if isinstance(task_id, list) else ['hard'] * len(completions)
-    priors   = n_prior_actions if isinstance(n_prior_actions, list) else [0] * len(completions)
-
-    for c, tid, n_prior in zip(completions, task_ids, priors):
-        text = c if isinstance(c, str) else c[0].get('content', '')
-        action = parse_action(text)
-
+def run_episode(model, tokenizer, env, system_prompt, 
+                max_steps=10, max_new_tokens=100):
+    """
+    Runs one full episode. Returns:
+      - trajectory: list of (prompt_text, completion_text, step_reward)
+      - total_reward: float
+      - solved: bool
+    """
+    res = env.reset()
+    obs = res[0] if isinstance(res, tuple) else res
+    
+    history = [{'role': 'system', 'content': system_prompt}]
+    
+    trajectory = []
+    total_reward = 0.0
+    solved = False
+    
+    for step in range(1, max_steps + 1):
+        obs_text = format_obs(obs, step)
+        history.append({'role': 'user', 'content': obs_text})
+        
+        prompt_text = tokenizer.apply_chat_template(
+            history, tokenize=False, add_generation_prompt=True
+        )
+        
+        inputs = tokenizer(
+            prompt_text,
+            return_tensors="pt",
+            truncation=True,
+            max_length=1800,
+            add_special_tokens=True,
+        ).to(model.device)
+        
+        with torch.no_grad():
+            output_ids = model.generate(
+                input_ids=inputs['input_ids'],
+                attention_mask=inputs['attention_mask'],
+                max_new_tokens=max_new_tokens,
+                temperature=0.8,
+                do_sample=True,
+                pad_token_id=tokenizer.eos_token_id,
+                use_cache=True,
+            )
+            
+        new_tokens = output_ids[0][inputs.input_ids.shape[1]:]
+        completion_text = tokenizer.decode(new_tokens, skip_special_tokens=True)
+        
+        action = parse_action(completion_text)
+        
         if action is None:
-            # Partial credit for having JSON structure but wrong format
-            if text.count('{') >= 1 and text.count('}') >= 1:
-                rewards.append(-0.1)   # has braces but unparseable
-            else:
-                rewards.append(-0.3)   # no JSON structure at all
-            continue
+            step_reward = -0.5
+            trajectory.append((prompt_text, completion_text, step_reward))
+            total_reward += step_reward
+            break
+            
+        n_passed_before = len(obs.passed_assertions)
+        result = env.step(action)
+        obs = result.observation
+        env_reward = result.reward or 0.0
+        n_passed_after = len(obs.passed_assertions)
+        
+        step_reward = env_reward
+        if n_passed_after > n_passed_before:
+            step_reward += 0.15 * (n_passed_after - n_passed_before)
+        elif step_reward <= 0:
+            step_reward -= 0.1  # no change and no progress
+        
+        step_reward -= 0.02  # Reduced efficiency penalty
+        
+        trajectory.append((prompt_text, completion_text, step_reward))
+        total_reward += step_reward
+        
+        history.append({'role': 'assistant', 'content': completion_text})
+        
+        if obs.pipeline_passed:
+            trajectory[-1] = (prompt_text, completion_text, step_reward + 1.0)
+            total_reward += 1.0
+            solved = True
+            break
+            
+    return trajectory, total_reward, solved
 
-        reward = 0.3  # format bonus for valid JSON
-        try:
-            env = DataPipelineEnv(task_id=tid)
-            res = env.reset()
-            obs = res[0] if isinstance(res, tuple) else res
+grpo_task_ids = ['easy', 'medium', 'hard', 'hard2']
+N_EPISODES_PER_TASK = 60   # 4 tasks × 30 = 120 episodes per epoch
+N_EPOCHS = 2
+GRPO_LR = 1e-5
+MAX_EPISODE_STEPS = 6
 
-            for ra in RECONSTRUCTION_ACTIONS[:n_prior]:
-                r = env.step(ra)
-                obs = r.observation
+from bitsandbytes.optim import PagedAdamW8bit
+optimizer = PagedAdamW8bit(
+    [p for p in model.parameters() if p.requires_grad],
+    lr=GRPO_LR, weight_decay=0.05
+)
 
-            n_passed_before = len(obs.passed_assertions)
+from transformers import get_cosine_schedule_with_warmup
+total_steps = N_EPOCHS * N_EPISODES_PER_TASK * len(grpo_task_ids)
+scheduler = get_cosine_schedule_with_warmup(
+    optimizer, 
+    num_warmup_steps=20, 
+    num_training_steps=total_steps
+)
 
-            result = env.step(action)
-            reward += result.reward or 0.0
-            obs_after = result.observation
-
-            n_passed_after = len(obs_after.passed_assertions)
-            if n_passed_after > n_passed_before:
-                reward += 0.2 * (n_passed_after - n_passed_before)
-
-            if action.action_type == 'compare_schema':
-                if obs_after.schema_diff and len(obs_after.schema_diff) > 0:
-                    reward += 0.3
-
-        except Exception:
-            reward -= 0.2
-
-        rewards.append(float(reward))
-    return rewards
-
-from src.tasks import TASKS as _available
-grpo_task_ids = ['hard', 'hard2']
-assert all(t in _available for t in grpo_task_ids), \
-    f"Missing tasks. Available: {list(_available.keys())}"
-
-grpo_prompts = []
-for tid in grpo_task_ids:
-    for _ in range(20):
-        # Step 1 prompt — no prior actions
-        env = DataPipelineEnv(task_id=tid)
-        res = env.reset()
-        obs = res[0] if isinstance(res, tuple) else res
-
-        chat = tokenizer.apply_chat_template(
-            [{'role': 'system', 'content': SYSTEM_PROMPT},
-             {'role': 'user',   'content': format_obs(obs, 1)}],
-            tokenize=False, add_generation_prompt=True)
-        grpo_prompts.append({'prompt': chat, 'task_id': tid, 'n_prior_actions': 0})
-
-        # Step 2 prompt — after read_data_sample
-        r1 = env.step(RECONSTRUCTION_ACTIONS[0])
-        obs = r1.observation
-        chat = tokenizer.apply_chat_template(
-            [{'role': 'system', 'content': SYSTEM_PROMPT},
-             {'role': 'user',   'content': format_obs(obs, 2)}],
-            tokenize=False, add_generation_prompt=True)
-        grpo_prompts.append({'prompt': chat, 'task_id': tid, 'n_prior_actions': 1})
-
-        # Step 3 prompt — after read_data_sample + compare_schema
-        r2 = env.step(RECONSTRUCTION_ACTIONS[1])
-        obs = r2.observation
-        chat = tokenizer.apply_chat_template(
-            [{'role': 'system', 'content': SYSTEM_PROMPT},
-             {'role': 'user',   'content': format_obs(obs, 3)}],
-            tokenize=False, add_generation_prompt=True)
-        grpo_prompts.append({'prompt': chat, 'task_id': tid, 'n_prior_actions': 2})
-
-grpo_ds = Dataset.from_list(grpo_prompts)
-print(f'GRPO dataset: {len(grpo_ds)} prompts')
-
-from trl import GRPOConfig, GRPOTrainer
-
+training_log = []
 GRPO_DIR = '/kaggle/working/grpo_qwen'
-grpo_config = GRPOConfig(
-    report_to='none',
-    average_tokens_across_devices=False,
-    output_dir=GRPO_DIR,
-    # VRAM Protections: 4 generations maximum inside the rollouts cache
-    num_generations=4,
-    max_completion_length=200,
-    temperature=0.8,
-    # do_sample=True,
-    per_device_train_batch_size=1,
-    gradient_accumulation_steps=4,
-    dataloader_num_workers=2,
-    num_train_epochs=2,
-    learning_rate=1e-5,
-    lr_scheduler_type='cosine',
-    lr_scheduler_kwargs={},
-    # fp16=True,
-    # bf16=False,
-    # Beta acts as a strongly anchored tether to the SFT training rules
-    beta=0.5,
-    loss_type='grpo',
-    logging_steps=1,
-    save_steps=40,
-    seed=42,
-    max_prompt_length=MAX_SEQ_LENGTH,
-    max_grad_norm=0.3,
-    warmup_steps=20,
-)
 
-from peft import prepare_model_for_kbit_training
-# model = prepare_model_for_kbit_training(model)
-# model.gradient_checkpointing_enable()
+for epoch in range(N_EPOCHS):
+    early_stop = False
+    task_list = grpo_task_ids * N_EPISODES_PER_TASK
+    random.shuffle(task_list)
+    
+    for step_idx, task_id in enumerate(task_list):
+        model.eval()
+        env = DataPipelineEnv(task_id=task_id, max_steps=MAX_EPISODE_STEPS)
+        trajectory, total_reward, solved = run_episode(
+            model, tokenizer, env, SYSTEM_PROMPT,
+            max_steps=MAX_EPISODE_STEPS
+        )
+        
+        if len(trajectory) == 0:
+            continue
+        
+        torch.cuda.empty_cache()
+        model.train()
+        total_loss = torch.tensor(0.0, dtype=torch.float32, device=model.device)
+        
+        for prompt_text, completion_text, step_reward in trajectory:
+            # Tokenize prompt and completion separately
+            prompt_ids = tokenizer(
+                prompt_text,
+                return_tensors='pt',
+                truncation=True,
+                max_length=MAX_SEQ_LENGTH,
+                add_special_tokens=False,
+            ).input_ids.to(model.device)
+            
+            completion_ids = tokenizer(
+                completion_text,
+                return_tensors='pt',
+                truncation=True,
+                max_length=256,
+                add_special_tokens=False,
+            ).input_ids.to(model.device)
+            
+            # Keep only last 200 tokens of prompt (most recent state)
+            MAX_PROMPT_TOKENS = 200
+            prompt_ids = prompt_ids[:, -MAX_PROMPT_TOKENS:]
+            
+            # Concatenate: [recent_state | action]
+            combined_ids = torch.cat([prompt_ids, completion_ids], dim=1)
+            attention_mask = torch.ones_like(combined_ids)
+            
+            # Labels: mask prompt tokens (-100 = ignore in loss),
+            # only train on completion tokens
+            labels = combined_ids.clone()
+            labels[:, :prompt_ids.shape[1]] = -100
+            
+            with torch.amp.autocast('cuda', dtype=torch.float16):
+                outputs = model(
+                    input_ids=combined_ids,
+                    attention_mask=attention_mask,
+                    labels=labels,
+                )
+            
+            # Skip if loss is NaN (can happen with very short completions)
+            if torch.isnan(outputs.loss):
+                continue
+                
+            reward_tensor = torch.tensor(
+                step_reward, dtype=torch.float32, device=model.device
+            )
+            step_loss = -reward_tensor * outputs.loss
+            total_loss = total_loss + step_loss
+        
+        total_loss = total_loss / max(len(trajectory), 1)
+        
+        optimizer.zero_grad()
+        total_loss.backward()
+        torch.nn.utils.clip_grad_norm_(
+            model.parameters(), max_norm=0.1
+        )
+        optimizer.step()
+        scheduler.step()
+        
+        log_entry = {
+            'step': step_idx + 1,
+            'task': task_id,
+            'total_reward': round(total_reward, 3),
+            'solved': solved,
+            'n_actions': len(trajectory),
+            'loss': round(total_loss.item(), 4),
+            'lr': scheduler.get_last_lr()[0]
+        }
+        training_log.append(log_entry)
+        
+        recent_window = training_log[-10:] if len(training_log) >= 10 \
+                        else training_log
+        avg_r = sum(x['total_reward'] for x in recent_window) / \
+                len(recent_window)
+        solved_pct = sum(x['solved'] for x in recent_window) / \
+                     len(recent_window) * 100
+        print(f"Ep {step_idx+1}/{total_steps} | task={task_id:<6} | "
+              f"reward={log_entry['total_reward']:+.3f} | "
+              f"avg10={avg_r:+.3f} | "
+              f"solved={solved_pct:.0f}% | "
+              f"steps={log_entry['n_actions']} | "
+              f"loss={log_entry['loss']:.4f} | "
+              f"lr={log_entry['lr']:.2e}")
 
-grpo_trainer = GRPOTrainer(
-    model=model,
-    tokenizer=tokenizer,
-    reward_funcs=pipeline_reward_fn,
-    args=grpo_config,
-    train_dataset=grpo_ds,
-)
+        # Early stopping: if rolling solve rate > 60% over last 30 
+        # episodes, training has converged
+        if len(training_log) >= 30:
+            last_30 = training_log[-30:]
+            rolling_solve = sum(x['solved'] for x in last_30) / 30
+            if rolling_solve >= 0.6:
+                print(f"\\n✓ Early stopping triggered at episode "
+                      f"{step_idx+1}: {rolling_solve*100:.0f}% "
+                      f"solve rate over last 30 episodes.")
+                early_stop = True
+                model.save_pretrained(GRPO_DIR)
+                break
+        
+        if (step_idx + 1) % 50 == 0:
+            model.save_pretrained(GRPO_DIR)
+            print(f"Checkpoint saved at step {step_idx+1}")
 
-print(f'GRPO: KL beta={grpo_config.beta}, G={grpo_config.num_generations}')
-print('Starting GRPO training...')
-grpo_stats = grpo_trainer.train()
-print(f'GRPO done. Loss: {grpo_stats.training_loss:.4f}')
+    if early_stop:
+        break
+
 model.save_pretrained(GRPO_DIR)
 tokenizer.save_pretrained(GRPO_DIR)
+
+total_solved = sum(x['solved'] for x in training_log)
+print(f"\\nGRPO Complete.")
+print(f"Episodes solved: {total_solved}/{len(training_log)} "
+      f"({100*total_solved/len(training_log):.1f}%)")
+print(f"Final avg reward (last 20): "
+      f"{sum(x['total_reward'] for x in training_log[-20:])/20:.3f}")
 
 
 # ==============================================================================
@@ -470,25 +564,49 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-# Extract reward history from trainer logs
-log_history = grpo_trainer.state.log_history
-steps    = [l['step']   for l in log_history if 'reward' in l]
-rewards  = [l['reward'] for l in log_history if 'reward' in l]
-losses   = [l['loss']   for l in log_history if 'loss'   in l]
-loss_steps = [l['step'] for l in log_history if 'loss'   in l]
+if training_log:
+    steps       = [x['step']         for x in training_log]
+    rewards     = [x['total_reward'] for x in training_log]
+    losses      = [x['loss']         for x in training_log]
+    solved_flag = [1 if x['solved'] else 0 
+                   for x in training_log]
 
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+    def rolling_avg(lst, w=10):
+        return [
+            sum(lst[max(0,i-w):i+1]) / 
+            len(lst[max(0,i-w):i+1])
+            for i in range(len(lst))
+        ]
 
-ax1.plot(steps, rewards, marker='o', color='green')
-ax1.set_title('GRPO Mean Episode Reward')
-ax1.set_xlabel('Step'); ax1.set_ylabel('Reward')
-ax1.grid(True)
+    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(15, 4))
 
-ax2.plot(loss_steps, losses, marker='o', color='blue')
-ax2.set_title('GRPO Training Loss')
-ax2.set_xlabel('Step'); ax2.set_ylabel('Loss')
-ax2.grid(True)
+    ax1.plot(steps, rewards, alpha=0.3, color='green', 
+             label='raw')
+    ax1.plot(steps, rolling_avg(rewards), color='green',
+             linewidth=2, label='smoothed')
+    ax1.set_title('Episode Total Reward')
+    ax1.set_xlabel('Episode')
+    ax1.set_ylabel('Reward')
+    ax1.legend()
+    ax1.grid(True)
 
-plt.tight_layout()
-plt.savefig('/kaggle/working/grpo_training_curves.png', dpi=150)
-print('Saved: /kaggle/working/grpo_training_curves.png')
+    ax2.plot(steps, losses, alpha=0.4, color='blue')
+    ax2.set_title('Training Loss per Episode')
+    ax2.set_xlabel('Episode')
+    ax2.set_ylabel('Loss')
+    ax2.grid(True)
+
+    ax3.plot(steps, rolling_avg(solved_flag, w=20), 
+             color='orange', linewidth=2)
+    ax3.set_title('Solve Rate (rolling 20)')
+    ax3.set_xlabel('Episode')
+    ax3.set_ylabel('Fraction Solved')
+    ax3.set_ylim(0, 1)
+    ax3.grid(True)
+
+    plt.tight_layout()
+    plt.savefig('/kaggle/working/grpo_training_curves.png', 
+                dpi=150)
+    print('Saved: /kaggle/working/grpo_training_curves.png')
+else:
+    print('No training log to plot.')

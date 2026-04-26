@@ -263,3 +263,6 @@
   - `max_grad_norm=0.3`
   - `warmup_steps=20` with `lr_scheduler_type='cosine'` and `lr_scheduler_kwargs={}`
   - invalid-JSON reward block updated to partial-credit `-0.1` for brace-containing near-miss outputs.
+- MAJOR CHANGE: Pivoting from single-step GRPO to true multi-step episode GRPO. Previous approach rewarded individual actions in isolation — model could not learn sequential reasoning. New approach runs full episodes, collects complete action trajectories, and assigns rewards based on terminal episode outcome + shaped intermediate rewards.
+- Previous single-step fixes that are still kept: JSON patch, beta=0.5, temperature=0.8, lr=1e-5, warmup_steps=20, lr_scheduler_type=cosine, max_grad_norm=0.1, shuffle_dataset=True.
+- max_steps per episode reduced from 30 to 10 for T4 VRAM constraints.

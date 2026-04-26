@@ -264,3 +264,14 @@ for credit assignment in a 20-step episode.
 **Decision:** In `train_grpo/train_grpo_qwen_merged.ipynb`, set GRPO `learning_rate=1e-5`, `warmup_steps=20`, `max_grad_norm=0.3`, add `lr_scheduler_type='cosine'` with `lr_scheduler_kwargs={}`, and change invalid-JSON reward handling to give `-0.1` when braces exist but parse fails (keep `-0.3` when no JSON structure exists).
 **Rationale:** Training collapsed after ~50 steps because high LR with near-zero warmup pushed policy outputs into invalid JSON, where a flat `-0.3` penalty removed useful gradient differences between near-correct and fully-garbage outputs. Lower LR + proper warmup + cosine decay reduces update volatility; tighter clipping prevents gradient spikes; softer near-miss penalty preserves a recoverable learning signal.
 **Tradeoff:** Slightly slower early optimization and potentially smaller short-term reward jumps, accepted for improved stability and reduced collapse risk over full GRPO runs.
+
+- DECISION: True episode GRPO chosen over single-step. Rationale: single-step ceiling is too low for the sequential diagnosis task. With 4 people and 1 day remaining, episode GRPO is feasible.
+- DECISION: max_steps=10 per episode (not 30) to fit T4 VRAM. Enough to learn: read -> inspect -> patch -> run_pipeline sequences.
+- DECISION: Reward shaping strategy for episodes:
+    * +0.15 per assertion newly passing at any step (intermediate)  
+    * -0.1 per wasted step (no progress, no assertion change)
+    * +1.0 terminal bonus if all assertions pass
+    * -0.05 per step used (efficiency penalty, encourages conciseness)
+    * Existing environment rewards from DataPipelineEnv.step() are ALSO included — they are the primary signal.
+- DECISION: Tasks for episode GRPO = all 4 difficulties (easy, medium, hard, hard2). Easy/medium give the model solvable episodes for positive terminal reward early in training.
+- DECISION: Dataset for episode GRPO = prompts only (no gold actions). Each prompt is just the initial observation from env.reset(). The model generates the full action sequence itself.
