@@ -126,15 +126,9 @@ import shutil
 print("Running Smoke Test for Model Saves...")
 try:
     model.save_pretrained('/kaggle/working/_smoke_test_lora')
-    model.save_pretrained_merged('/kaggle/working/_smoke_test_merged', tokenizer, save_method='merged_16bit')
-
-    # Verify config.json is valid
-    with open('/kaggle/working/_smoke_test_merged/config.json', 'r') as f:
-        json.loads(f.read())
 
     print("Smoke test PASSED — safe to proceed.")
     shutil.rmtree('/kaggle/working/_smoke_test_lora', ignore_errors=True)
-    shutil.rmtree('/kaggle/working/_smoke_test_merged', ignore_errors=True)
 except Exception as e:
     import traceback
     traceback.print_exc()
@@ -216,7 +210,7 @@ def collect_gold(task_ids=['easy','medium', 'hard', 'hard2'], n_ep=10):
                 if obs.pipeline_passed: break
     return pairs
 
-gold_pairs = collect_gold(n_ep=10)
+gold_pairs = collect_gold(n_ep=40)
 print(f'Collected {len(gold_pairs)} SFT pairs')
 
 from datasets import Dataset
@@ -235,7 +229,7 @@ sft_texts = [
 sft_ds = Dataset.from_dict({'text': sft_texts})
 sft_ds_split = sft_ds.train_test_split(test_size=0.1, seed=42)
 
-SFT_DIR = '/kaggle/working/sft_qwen'
+SFT_LORA_DIR = '/kaggle/working/sft_lora_adapter'
 
 # Extreme VRAM preservation applied to SFT
 print('--- Starting SFT ---')
@@ -252,31 +246,38 @@ sft_trainer = SFTTrainer(
         average_tokens_across_devices=False,
         per_device_train_batch_size=1,
         gradient_accumulation_steps=8,
-        num_train_epochs=2,
+        num_train_epochs=4,
         eval_strategy='steps',
-        eval_steps=20,
+        eval_steps=10,
         # load_best_model_at_end=True,
         # metric_for_best_model='eval_loss',
         warmup_ratio=0.1,
-        learning_rate=1e-4,
+        learning_rate=5e-5,
         fp16=not is_bfloat16_supported(),
         bf16=is_bfloat16_supported(),
         logging_steps=5, optim='adamw_8bit',
         weight_decay=0.05, lr_scheduler_type='cosine',
-        output_dir=SFT_DIR, save_steps=40, seed=42,
+        output_dir=SFT_LORA_DIR, save_steps=20, seed=42,
+        save_total_limit=3,
     ),
 )
 sft_stats = sft_trainer.train()
 print(f'SFT done. Loss: {sft_stats.training_loss:.4f}')
-model.save_pretrained(SFT_DIR)
-tokenizer.save_pretrained(SFT_DIR)
+model.save_pretrained(SFT_LORA_DIR)
+tokenizer.save_pretrained(SFT_LORA_DIR)
 
-HF_REPO = 'Abhinav-hf/qwen-grpo-sft-trained-16bit'
+print("\\n=== SFT Training Curve ===")
+for log in sft_trainer.state.log_history:
+    step = log.get('step', '?')
+    train_loss = log.get('loss', '')
+    eval_loss = log.get('eval_loss', '')
+    print(f"Step {step}: train={train_loss}, eval={eval_loss}")
 
 if HF_TOKEN:
-    print(f'Pushing seamlessly compiled SFT 16-bit model to Hub: {HF_REPO}')
-    model.push_to_hub_merged(HF_REPO, tokenizer, save_method='merged_16bit', token=HF_TOKEN)
-    print(f'SFT Hub upload complete. GRPO will now commence and overwrite the main weights once finished.')
+    SFT_HF_REPO = 'Abhinav-hf/qwen-sft-lora-adapter'
+    model.push_to_hub(SFT_HF_REPO, token=HF_TOKEN)
+    tokenizer.push_to_hub(SFT_HF_REPO, token=HF_TOKEN)
+    print(f'SFT LoRA adapter pushed to: {SFT_HF_REPO}')
 else:
     print('No HF_TOKEN detected — skipping SFT Hub upload.')
 
@@ -383,9 +384,29 @@ def run_episode(model, tokenizer, env, system_prompt,
             
     return trajectory, total_reward, solved
 
+print("\\n=== Diagnostic: Test SFT model on episodes ===")
+model.eval()
+for test_task in ['easy', 'medium', 'hard', 'hard2']:
+    env_test = DataPipelineEnv(task_id=test_task, max_steps=6)
+    traj, total_r, solved = run_episode(
+        model, tokenizer, env_test, SYSTEM_PROMPT,
+        max_steps=6, max_new_tokens=100
+    )
+    print(f"\\n--- Task: {test_task} ---")
+    print(f"Solved: {solved}, Total reward: {total_r:.3f}, "
+          f"Steps taken: {len(traj)}")
+    for i, (_, completion, reward) in enumerate(traj):
+        print(f"  Step {i+1} reward={reward:.3f}")
+        print(f"  Completion: {completion[:200]}")
+        parsed = parse_action(completion)
+        print(f"  Parsed: {'OK' if parsed else 'FAILED'}")
+
+# Stop here if parse rate < 50% — GRPO is hopeless
+import sys
+
 grpo_task_ids = ['easy', 'medium', 'hard', 'hard2']
-N_EPISODES_PER_TASK = 60   # 4 tasks × 30 = 120 episodes per epoch
-N_EPOCHS = 2
+N_EPISODES_PER_TASK = 20   # 4 tasks × 20 = 80 episodes per epoch
+N_EPOCHS = 1
 GRPO_LR = 1e-5
 MAX_EPISODE_STEPS = 6
 
@@ -404,7 +425,11 @@ scheduler = get_cosine_schedule_with_warmup(
 )
 
 training_log = []
-GRPO_DIR = '/kaggle/working/grpo_qwen'
+GRPO_DIR = '/kaggle/working/grpo_lora_adapter'
+
+best_avg_reward = float('-inf')
+best_checkpoint_step = 0
+BEST_DIR = '/kaggle/working/grpo_lora_adapter_best'
 
 for epoch in range(N_EPOCHS):
     early_stop = False
@@ -509,6 +534,14 @@ for epoch in range(N_EPOCHS):
               f"loss={log_entry['loss']:.4f} | "
               f"lr={log_entry['lr']:.2e}")
 
+        # Save best checkpoint based on rolling average reward
+        if len(training_log) >= 10 and avg_r > best_avg_reward:
+            best_avg_reward = avg_r
+            best_checkpoint_step = step_idx + 1
+            model.save_pretrained(BEST_DIR)
+            tokenizer.save_pretrained(BEST_DIR)
+            print(f"  ⭐ New best avg reward: {avg_r:.3f}, saved to {BEST_DIR}")
+
         # Early stopping: if rolling solve rate > 60% over last 30 
         # episodes, training has converged
         if len(training_log) >= 30:
@@ -520,6 +553,18 @@ for epoch in range(N_EPOCHS):
                       f"solve rate over last 30 episodes.")
                 early_stop = True
                 model.save_pretrained(GRPO_DIR)
+                break
+        
+        if step_idx + 1 == 30:
+            parse_failures = sum(1 for x in training_log[:30] 
+                                 if x['n_actions'] <= 1)
+            if parse_failures >= 25:
+                print(f"\\n⚠ ABORT: {parse_failures}/30 episodes had "
+                      f"parse failures. Using SFT model only.")
+                # Reload SFT weights
+                import shutil
+                if os.path.exists(SFT_LORA_DIR):
+                    shutil.copytree(SFT_LORA_DIR, GRPO_DIR, dirs_exist_ok=True)
                 break
         
         if (step_idx + 1) % 50 == 0:
@@ -544,21 +589,21 @@ print(f"Final avg reward (last 20): "
 # 5. EXPORT / PUSH TO HUGGINGFACE HUB
 # ==============================================================================
 
-LOCAL_MERGED_DIR = '/kaggle/working/qwen-merged-16bit'
-print(f'Saving completely merged 16-bit GRPO model locally to {LOCAL_MERGED_DIR}...')
+GRPO_HF_REPO = 'Abhinav-hf/qwen-grpo-lora-adapter'
 
-model.save_pretrained_merged(
-    LOCAL_MERGED_DIR,
-    tokenizer,
-    save_method='merged_16bit'
-)
-HF_REPO = 'Abhinav-hf/qwen-grpo-complete-trained-16bit'
 if HF_TOKEN:
-    print(f'Pushing seamlessly compiled GRPO model to Hub: {HF_REPO}')
-    model.push_to_hub_merged(HF_REPO, tokenizer, save_method='merged_16bit', token=HF_TOKEN)
-    print(f'Done! Final GRPO Model available at: https://huggingface.co/{HF_REPO}')
+    # Push the final GRPO adapter (model is already in memory, no reload needed)
+    model.push_to_hub(GRPO_HF_REPO, token=HF_TOKEN)
+    tokenizer.push_to_hub(GRPO_HF_REPO, token=HF_TOKEN)
+    print(f'GRPO LoRA adapter pushed to: {GRPO_HF_REPO}')
 else:
-    print('No HF_TOKEN detected — skipping Hub upload. Local save complete.')
+    print('No HF_TOKEN — skipping Hub push.')
+
+# To load later:
+# from peft import PeftModel
+# from transformers import AutoModelForCausalLM, AutoTokenizer
+# base = AutoModelForCausalLM.from_pretrained("Qwen/Qwen2.5-3B-Instruct")
+# model = PeftModel.from_pretrained(base, "Abhinav-hf/qwen-grpo-lora-adapter")
 
 import matplotlib
 matplotlib.use('Agg')
