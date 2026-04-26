@@ -655,3 +655,126 @@ if training_log:
     print('Saved: /kaggle/working/grpo_training_curves.png')
 else:
     print('No training log to plot.')
+
+print("\\n" + "="*60)
+print("FINAL EVALUATION — comparing SFT vs GRPO adapters")
+print("="*60)
+
+from peft import PeftModel
+from unsloth import FastLanguageModel
+import gc
+
+EVAL_RESULTS = {}
+
+def evaluate_adapter(adapter_repo, label):
+    # Free current model from memory
+    global model, tokenizer
+    del model, tokenizer
+    gc.collect()
+    torch.cuda.empty_cache()
+    
+    # Load fresh base + adapter
+    eval_model, eval_tok = FastLanguageModel.from_pretrained(
+        model_name='Qwen/Qwen2.5-3B-Instruct',
+        max_seq_length=MAX_SEQ_LENGTH,
+        load_in_8bit=True,
+        token=HF_TOKEN,
+    )
+    eval_model = PeftModel.from_pretrained(
+        eval_model, adapter_repo, token=HF_TOKEN
+    )
+    FastLanguageModel.for_inference(eval_model)
+    
+    results = {}
+    for tid in ['easy', 'medium', 'hard', 'hard2']:
+        solves = 0
+        total_r = 0.0
+        for trial in range(5):
+            env_eval = DataPipelineEnv(task_id=tid, max_steps=6)
+            _, r, solved = run_episode(
+                eval_model, eval_tok, env_eval, SYSTEM_PROMPT,
+                max_steps=6, max_new_tokens=100
+            )
+            if solved: solves += 1
+            total_r += r
+        results[tid] = {
+            'solve_rate': solves/5,
+            'avg_reward': total_r/5
+        }
+        print(f"  {label} | {tid:<6} | "
+              f"solve={solves}/5 | avg_r={total_r/5:+.3f}")
+    
+    del eval_model, eval_tok
+    gc.collect()
+    torch.cuda.empty_cache()
+    return results
+
+print("\\n--- Evaluating SFT-only adapter ---")
+EVAL_RESULTS['sft'] = evaluate_adapter(
+    'Abhinav-hf/qwen-sft-lora-adapter', 'SFT'
+)
+
+print("\\n--- Evaluating GRPO adapter ---")  
+EVAL_RESULTS['grpo'] = evaluate_adapter(
+    'Abhinav-hf/qwen-grpo-lora-adapter', 'GRPO'
+)
+
+# Compare and pick winner
+sft_total = sum(r['solve_rate'] for r in EVAL_RESULTS['sft'].values())
+grpo_total = sum(r['solve_rate'] for r in EVAL_RESULTS['grpo'].values())
+
+print(f"\\n{'='*60}")
+print(f"SFT total solves:  {sft_total*5}/20")
+print(f"GRPO total solves: {grpo_total*5}/20")
+print(f"WINNER: {'GRPO' if grpo_total >= sft_total else 'SFT'}")
+print(f"{'='*60}")
+
+if HF_TOKEN and os.path.exists(BEST_DIR):
+    # Push the genuinely best checkpoint as a separate repo
+    from huggingface_hub import HfApi
+    api = HfApi(token=HF_TOKEN)
+    BEST_REPO = 'Abhinav-hf/qwen-grpo-best-lora-adapter'
+    api.create_repo(BEST_REPO, exist_ok=True, private=False)
+    api.upload_folder(
+        folder_path=BEST_DIR,
+        repo_id=BEST_REPO,
+        commit_message='Best GRPO checkpoint at episode 49'
+    )
+    print(f"Best GRPO checkpoint pushed: {BEST_REPO}")
+
+print("\\n--- Evaluating GRPO BEST checkpoint ---")
+EVAL_RESULTS['grpo_best'] = evaluate_adapter(
+    'Abhinav-hf/qwen-grpo-best-lora-adapter', 'GRPO_BEST'
+)
+
+print("\\n" + "="*60)
+print("SUBMISSION RECOMMENDATION")
+print("="*60)
+
+rankings = []
+for label, results in EVAL_RESULTS.items():
+    total_solves = sum(r['solve_rate'] for r in results.values()) * 5
+    total_reward = sum(r['avg_reward'] for r in results.values())
+    rankings.append((label, total_solves, total_reward))
+
+rankings.sort(key=lambda x: (x[1], x[2]), reverse=True)
+
+print(f"\\nRanked by solve count then total reward:")
+for i, (label, solves, reward) in enumerate(rankings, 1):
+    repo = {
+        'sft': 'Abhinav-hf/qwen-sft-lora-adapter',
+        'grpo': 'Abhinav-hf/qwen-grpo-lora-adapter',
+        'grpo_best': 'Abhinav-hf/qwen-grpo-best-lora-adapter',
+    }[label]
+    print(f"{i}. {label.upper():<10} | solves={solves}/20 | "
+          f"reward={reward:+.2f} | {repo}")
+
+winner = rankings[0]
+repo_winner = {
+    'sft': 'Abhinav-hf/qwen-sft-lora-adapter',
+    'grpo': 'Abhinav-hf/qwen-grpo-lora-adapter',
+    'grpo_best': 'Abhinav-hf/qwen-grpo-best-lora-adapter',
+}[winner[0]]
+
+print(f"\\n>>> SUBMIT: {winner[0].upper()} <<<")
+print(f">>> REPO: {repo_winner} <<<")
