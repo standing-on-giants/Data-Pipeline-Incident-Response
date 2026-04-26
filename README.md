@@ -36,9 +36,6 @@ We collected successful trajectories by interacting with the environment on `eas
 
 After training, the GRPO model successfully discarded chaotic zero-shot code-generation reflexes. It learned to sequentially load the schema, check the data, apply safe structural patches, completely avoid the blind-patch penalty, and gracefully handle dynamic contract drift during pipeline validation runs.
 
-![Training Progress Plot — GRPO Reward Stabilization and Improvement Over Training Steps.](media/training_curve.png)
-
-![Evaluation Score Comparison — Trained Qwen GRPO Agent vs. Untrained Baseline across difficulty tasks.](media/eval_results.png)
 
 *For our extensive environment interaction training process and GRPO tuning details, check out `train_grpo/train_grpo_qwen_merged.ipynb` and `inference_qwen_comparison_GRPO_vs_og.py`.*
 
