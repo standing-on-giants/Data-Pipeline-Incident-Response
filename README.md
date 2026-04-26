@@ -20,7 +20,59 @@ This environment simulates a real-world data engineering incident room. Every da
 
 An AI agent is placed inside a broken pipeline and must diagnose the root cause, apply the correct fix, and verify the pipeline passes — without hallucinating fixes it hasn't confirmed via data inspection.
 
-**The novel contribution for Round 2:** dynamic schema drift injected mid-episode. After the agent applies initial fixes, the upstream API *mutates again* (column rename → auth format rotation → rate limit tightening), forcing the agent to detect and adapt to live contract changes — not just resolve a static fault.
+**The novel contribution for Round 2:** dynamic schema drift injected mid-episode. After the agent applies initial fixes, the upstream API _mutates again_ (column rename → auth format rotation → rate limit tightening), forcing the agent to detect and adapt to live contract changes — not just resolve a static fault.
+
+---
+
+## Round 2 Positioning (Theme + Real-World Fit)
+
+### Primary Theme
+
+- **Theme 3.1 — World Modeling: Professional Tasks**
+
+### Secondary Theme
+
+- **Theme 2 — Long-Horizon Planning & Instruction Following**
+
+### Why this project fits
+
+- The agent interacts with a realistic tool workflow (data samples, schema checks, pipeline runs, upstream escalation), not a static QA benchmark.
+- The world is partially observable: the agent only sees failures and must probe hidden state using actions.
+- The environment includes delayed rewards and long trajectories (diagnose -> patch -> rerun -> drift appears again -> re-diagnose).
+- The dynamic drift schedule in `hard2` forces durable state tracking and error recovery, not one-shot pattern matching.
+
+### Real-world relevance
+
+- Simulates on-call data engineering incidents: schema drift, API contract change, malformed numeric formats, duplicate events, and join-key mismatch.
+- Mirrors enterprise incident response where correct triage, minimal-risk patching, and selective escalation matter.
+- Trains behavior directly useful for production assistant agents in analytics, growth, ads, and ETL reliability workflows.
+
+---
+
+## Judge-Facing Evidence Map
+
+### 1) Environment Innovation (40%)
+
+- Native OpenEnv environment with typed actions + typed observations.
+- Dynamic mid-episode drift (run-indexed) in `hard2`, forcing adaptation under changing contracts.
+- Anti-shortcut design: blind-fix penalties and loop pressure to reward disciplined diagnosis.
+
+### 2) Storytelling (30%)
+
+- A clear narrative: "2 AM incident room" -> diagnose -> patch -> validate -> adapt to new drift.
+- Action logs expose agent reasoning steps in sequence for demo-friendly playback.
+
+### 3) Improvement in Rewards (20%)
+
+- Baseline and trained model comparisons across `easy`, `medium`, `hard`, `hard2`.
+- Explicit per-task and average score reporting in the comparison scripts.
+- Before/after behavior can be shown with the same environment and reward function.
+
+### 4) Reward & Training Pipeline (10%)
+
+- Two-stage pipeline: SFT -> GRPO.
+- Coherent reward shaping: assertion progress, drift handling, format validity, loop discouragement.
+- Reproducible training/eval artifacts in notebooks and scripts.
 
 ---
 
@@ -30,24 +82,24 @@ An AI agent is placed inside a broken pipeline and must diagnose the root cause,
 Data pipelines break every single day in production. A vendor silently changes an API export format, numeric fields arrive as currency strings, deduplication keys shift, or join keys grow unexpected prefixes. Today, Data Engineers are woken up at 2 AM to manually write SQL queries, check schemas, and push hotfixes. It’s tedious, manual, and reactive. We need an AI agent that can act as an autonomous Level 1 On-Call Data Engineer.
 
 **The Environment**
-We built a fully interactive incident room for AI agents. Instead of just "generating code," the agent is dropped into a live, broken pipeline graph. It receives an alert (failing data quality assertions) and must iteratively query the data (`read_data_sample`, `compare_schema`), diagnose the root cause, and apply structural patches (`add_data_filter`, `patch_transformation`). 
+We built a fully interactive incident room for AI agents. Instead of just "generating code," the agent is dropped into a live, broken pipeline graph. It receives an alert (failing data quality assertions) and must iteratively query the data (`read_data_sample`, `compare_schema`), diagnose the root cause, and apply structural patches (`add_data_filter`, `patch_transformation`).
 
 **What the Agent Learned**
-At first, smaller models like Qwen 1.5B/3B and LLaMA 3.1 8B failed completely. They would hallucinate fixes without looking at the data, get stuck in infinite loops, or blindly sweep errors under the rug. 
-Through aggressive reward shaping and GRPO training, the agent learned a disciplined, professional workflow. It learned that it *must* inspect the schema before patching. It learned to break out of its own loops by reviewing its trajectory history. Ultimately, it transformed from a chaotic code-generator into a methodical, reasoning-driven Data Engineer.
+At first, smaller models like Qwen 1.5B/3B and LLaMA 3.1 8B failed completely. They would hallucinate fixes without looking at the data, get stuck in infinite loops, or blindly sweep errors under the rug.
+Through aggressive reward shaping and GRPO training, the agent learned a disciplined, professional workflow. It learned that it _must_ inspect the schema before patching. It learned to break out of its own loops by reviewing its trajectory history. Ultimately, it transformed from a chaotic code-generator into a methodical, reasoning-driven Data Engineer.
 
 ---
 
 ## Environment Spec
 
-| Property | Value |
-|---|---|
-| Protocol | OpenEnv WebSocket (`/ws`) + HTTP health (`/health`) |
-| Action space | 11 discrete typed actions |
-| Observation space | Pydantic `PipelineObservation` (see below) |
-| Episode length | Max 20 steps |
-| Reward range | [−1.0, +1.5] per step; terminal +1.0 bonus on full pass |
-| Tasks | `easy`, `medium`, `hard`, `hard2` |
+| Property          | Value                                                   |
+| ----------------- | ------------------------------------------------------- |
+| Protocol          | OpenEnv WebSocket (`/ws`) + HTTP health (`/health`)     |
+| Action space      | 11 discrete typed actions                               |
+| Observation space | Pydantic `PipelineObservation` (see below)              |
+| Episode length    | Max 20 steps                                            |
+| Reward range      | [−1.0, +1.5] per step; terminal +1.0 bonus on full pass |
+| Tasks             | `easy`, `medium`, `hard`, `hard2`                       |
 
 ---
 
@@ -55,58 +107,58 @@ Through aggressive reward shaping and GRPO training, the agent learned a discipl
 
 Every `step()` and `reset()` returns a `PipelineObservation` with these fields:
 
-| Field | Type | Description |
-|---|---|---|
-| `task_id` | str | Task identifier |
-| `difficulty` | str | easy / medium / hard |
-| `description` | str | Human-readable problem description |
-| `step_number` | int | Current step in episode |
-| `max_steps` | int | Episode length limit (20) |
-| `dag_structure` | list[DAGNode] | Pipeline steps with applied filters/patches |
-| `failed_assertions` | list[AssertionResult] | Assertions currently failing |
-| `passed_assertions` | list[AssertionResult] | Assertions currently passing |
-| `historical_runs` | list[HistoricalRun] | Last 3 run records (date, status, row count) |
-| `data_sample` | list[dict] \| None | Populated after `read_data_sample` |
-| `current_schema` | dict \| None | Populated after `check_schema` |
-| `historical_schema` | dict \| None | Populated after `compare_schema` |
-| `schema_diff` | dict \| None | new/removed/changed columns after `compare_schema` |
-| `last_action_result` | str | Natural language result of last action |
-| `actions_taken` | list[str] | History of actions this episode |
-| `pipeline_passed` | bool | True when all assertions pass |
-| `alert_sent` | bool | True after `alert_upstream_team` was called |
+| Field                | Type                  | Description                                        |
+| -------------------- | --------------------- | -------------------------------------------------- |
+| `task_id`            | str                   | Task identifier                                    |
+| `difficulty`         | str                   | easy / medium / hard                               |
+| `description`        | str                   | Human-readable problem description                 |
+| `step_number`        | int                   | Current step in episode                            |
+| `max_steps`          | int                   | Episode length limit (20)                          |
+| `dag_structure`      | list[DAGNode]         | Pipeline steps with applied filters/patches        |
+| `failed_assertions`  | list[AssertionResult] | Assertions currently failing                       |
+| `passed_assertions`  | list[AssertionResult] | Assertions currently passing                       |
+| `historical_runs`    | list[HistoricalRun]   | Last 3 run records (date, status, row count)       |
+| `data_sample`        | list[dict] \| None    | Populated after `read_data_sample`                 |
+| `current_schema`     | dict \| None          | Populated after `check_schema`                     |
+| `historical_schema`  | dict \| None          | Populated after `compare_schema`                   |
+| `schema_diff`        | dict \| None          | new/removed/changed columns after `compare_schema` |
+| `last_action_result` | str                   | Natural language result of last action             |
+| `actions_taken`      | list[str]             | History of actions this episode                    |
+| `pipeline_passed`    | bool                  | True when all assertions pass                      |
+| `alert_sent`         | bool                  | True after `alert_upstream_team` was called        |
 
 ---
 
 ## Action Space
 
-| Action | Key Params | Description |
-|---|---|---|
-| `read_data_sample` | `table`, `n_rows` | Read rows from a table. Required before any fix — blind fixes incur −0.5 penalty. |
-| `check_schema` | `table` | Inspect current column names and types. |
-| `compare_schema` | `table` | Diff current schema against historical. Surfaces renames/additions/removals. |
-| `handle_drift` | `strategy`, `table`, `old_column`, `new_column` | Handle schema/contract drift. Strategies: `detect`, `resolve_column_rename`, `numeric_format`, `null_fill`, `type_cast`, `join_key_prefix`, `filter_invalid`, `alert_upstream`. |
-| `run_quality_assertion` | `assertion_id` | Re-run a specific assertion on demand. |
-| `add_data_filter` | `step_id`, `filter_condition` | Add a WHERE-style row filter to a DAG step (e.g. `user_id IS NOT NULL`). |
-| `patch_transformation` | `step_id`, `patch_type`, `column` | Apply a column-level fix. patch_types: `cast_column`, `coalesce`, `dedup`, `parse_currency`, `strip_prefix`. |
-| `backfill_partition` | `date` | Re-run pipeline for a specific date partition. |
-| `alert_upstream_team` | `team`, `issue_description` | Escalate to the data source owner. Rewarded +0.5 when required, penalised −0.2 if unnecessary. |
-| `mark_acceptable` | `assertion_id`, `reason` | Consciously accept a known data quality issue. Penalised −1.0 if the assertion is still failing and fixable. |
-| `run_pipeline` | — | Re-execute full pipeline. Returns new assertion results and reward delta. |
+| Action                  | Key Params                                      | Description                                                                                                                                                                     |
+| ----------------------- | ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `read_data_sample`      | `table`, `n_rows`                               | Read rows from a table. Required before any fix — blind fixes incur −0.5 penalty.                                                                                               |
+| `check_schema`          | `table`                                         | Inspect current column names and types.                                                                                                                                         |
+| `compare_schema`        | `table`                                         | Diff current schema against historical. Surfaces renames/additions/removals.                                                                                                    |
+| `handle_drift`          | `strategy`, `table`, `old_column`, `new_column` | Handle schema/contract drift. Strategies: `detect`, `resolve_column_rename`, `numeric_format`, `null_fill`, `type_cast`, `join_key_prefix`, `filter_invalid`, `alert_upstream`. |
+| `run_quality_assertion` | `assertion_id`                                  | Re-run a specific assertion on demand.                                                                                                                                          |
+| `add_data_filter`       | `step_id`, `filter_condition`                   | Add a WHERE-style row filter to a DAG step (e.g. `user_id IS NOT NULL`).                                                                                                        |
+| `patch_transformation`  | `step_id`, `patch_type`, `column`               | Apply a column-level fix. patch_types: `cast_column`, `coalesce`, `dedup`, `parse_currency`, `strip_prefix`.                                                                    |
+| `backfill_partition`    | `date`                                          | Re-run pipeline for a specific date partition.                                                                                                                                  |
+| `alert_upstream_team`   | `team`, `issue_description`                     | Escalate to the data source owner. Rewarded +0.5 when required, penalised −0.2 if unnecessary.                                                                                  |
+| `mark_acceptable`       | `assertion_id`, `reason`                        | Consciously accept a known data quality issue. Penalised −1.0 if the assertion is still failing and fixable.                                                                    |
+| `run_pipeline`          | —                                               | Re-execute full pipeline. Returns new assertion results and reward delta.                                                                                                       |
 
 ---
 
 ## Reward Model
 
-| Event | Reward |
-|---|---|
-| Each assertion newly passing after `run_pipeline` | +0.4 |
-| Each assertion newly failing after `run_pipeline` | −0.5 |
-| Correct upstream escalation (required task) | +0.5 |
-| Unnecessary escalation | −0.2 |
-| `handle_drift(resolve_column_rename)` successful | +0.2 |
-| Fix applied without reading data first (blind fix) | −0.5 |
-| `mark_acceptable` on a still-failing assertion | −1.0 |
-| All assertions passing (terminal bonus) | +1.0 |
+| Event                                              | Reward |
+| -------------------------------------------------- | ------ |
+| Each assertion newly passing after `run_pipeline`  | +0.4   |
+| Each assertion newly failing after `run_pipeline`  | −0.5   |
+| Correct upstream escalation (required task)        | +0.5   |
+| Unnecessary escalation                             | −0.2   |
+| `handle_drift(resolve_column_rename)` successful   | +0.2   |
+| Fix applied without reading data first (blind fix) | −0.5   |
+| `mark_acceptable` on a still-failing assertion     | −1.0   |
+| All assertions passing (terminal bonus)            | +1.0   |
 
 Final episode score = `assertions_passed / assertions_total`, clipped to [0.01, 0.99].
 
@@ -115,25 +167,30 @@ Final episode score = `assertions_passed / assertions_total`, clipped to [0.01, 
 ## Tasks
 
 ### easy
+
 **Fault:** 5 of 100 rows in `raw_orders` have null `user_id` (upstream export misfire caused by a new nullable column).
 **Assertions:** A1 not_null(user_id), A2 unique(order_id), A3 row_count(80–110)
 **Fix:** `add_data_filter` → `user_id IS NOT NULL`
 **Baseline score (Gemini 2.5 Flash):** ~0.99
 
 ### medium
+
 **Fault:** Vendor resent 20 duplicate `order_item_id` rows, inflating row counts and breaking uniqueness.
 **Assertions:** B1 unique(order_item_id), B2 not_null(order_id), B3 row_count(195–205), B4 value_range(unit_price)
 **Fix:** `patch_transformation` → `dedup(order_item_id)`
 **Baseline score (Gemini 2.5 Flash):** ~0.95
 
 ### hard
+
 **Fault:** Four simultaneous faults — Meta Graph API v19 changed `spend`/`impressions` to currency strings with N/A values; Conversions API retried events causing duplicates; join key has `CMP_` prefix mismatch. Upstream alert is required.
 **Assertions:** H1–H8 (8 assertions across `clean_insights`, `clean_conversions`, `roas_summary`)
 **Fix:** Multiple patches + dedup + strip_prefix + cast + alert_upstream
 **Baseline score (Gemini 2.5 Flash):** ~0.75 (TBD — hard task not yet solved by base model)
 
 ### hard2
+
 **Fault:** Same as `hard` plus a dynamic drift schedule applied between `run_pipeline` calls:
+
 - Run 2: `spend` renamed to `total_spend` in `raw_ads_insights`
 - Run 3: Auth token format rotated to `Bearer-v2`
 - Run 4: Rate limit tightened to 1 call/window
@@ -251,9 +308,9 @@ See `run_on_kaggle_LlaMa.ipynb` for the training notebook.
 
 ## Anti-Patterns Tested
 
-| Anti-pattern | Penalty | Why it matters |
-|---|---|---|
-| Applying a filter/patch without reading data | −0.5 | Forces real diagnosis, not guessing |
-| Marking a failing assertion as acceptable | −1.0 | Prevents lazy "it's fine" behaviour |
-| Unnecessary upstream escalation | −0.2 | Escalation should be earned |
+| Anti-pattern                                       | Penalty        | Why it matters                           |
+| -------------------------------------------------- | -------------- | ---------------------------------------- |
+| Applying a filter/patch without reading data       | −0.5           | Forces real diagnosis, not guessing      |
+| Marking a failing assertion as acceptable          | −1.0           | Prevents lazy "it's fine" behaviour      |
+| Unnecessary upstream escalation                    | −0.2           | Escalation should be earned              |
 | Patching before calling compare_schema after drift | 0 fix progress | Tests drift detection, not just patching |

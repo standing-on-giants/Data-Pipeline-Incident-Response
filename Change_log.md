@@ -240,6 +240,13 @@
   - Fixed GRPO loading: 3-tier priority (local → HF Hub → LoRA adapter), with explicit error if all fail
   - Fixed report table: dynamic columns, only shows evaluated models, prints `Models evaluated: [...]`
 
+### Refactor: Local LoRA Loading & Memory Optimization
+- Refactored `inference_qwen_comparison_GRPO_vs_og.py` to fix local LoRA loading issues and optimize memory usage:
+  - Fixed tokenizer loading for local fallback directory by explicitly removing HF Hub kwargs and using only `local_files_only=True`.
+  - Eliminated the call to `merge_and_unload()` during PEFT model loading to reduce high memory usage and startup delay.
+  - Implemented a unified `_load_base()` model that is loaded once and shared across multiple evaluations (Base, SFT, GRPO).
+  - Adopted `sft_model.unload()` and `grpo_model.unload()` patterns to clean adapter state and restore the shared base model between evaluation runs.
+
 ## 2026-04-25 — GRPO Reward Collapse Stabilization (Qwen merged notebook)
 
 - Updated `train_grpo/train_grpo_qwen_merged.ipynb` GRPO config for collapse recovery:
