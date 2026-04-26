@@ -121,20 +121,19 @@ trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
 total = sum(p.numel() for p in model.parameters())
 print(f'Trainable Parameters: {trainable/1e6:.1f}M / {total/1e9:.2f}B ({100*trainable/total:.2f}%)')
 
-# === SMOKE TEST: Verify save works before training ===
+# === SMOKE TEST: Verify LoRA adapter save works before training ===
 import shutil
-print("Running Smoke Test for Model Saves...")
+print("Running Smoke Test for LoRA adapter save...")
 try:
     model.save_pretrained('/kaggle/working/_smoke_test_lora')
-    model.save_pretrained_merged('/kaggle/working/_smoke_test_merged', tokenizer, save_method='merged_16bit')
+    tokenizer.save_pretrained('/kaggle/working/_smoke_test_lora')
 
-    # Verify config.json is valid
-    with open('/kaggle/working/_smoke_test_merged/config.json', 'r') as f:
+    # Verify adapter_config.json is valid
+    with open('/kaggle/working/_smoke_test_lora/adapter_config.json', 'r') as f:
         json.loads(f.read())
 
-    print("Smoke test PASSED — safe to proceed.")
+    print("Smoke test PASSED — LoRA adapter save is working.")
     shutil.rmtree('/kaggle/working/_smoke_test_lora', ignore_errors=True)
-    shutil.rmtree('/kaggle/working/_smoke_test_merged', ignore_errors=True)
 except Exception as e:
     import traceback
     traceback.print_exc()
@@ -268,15 +267,18 @@ sft_trainer = SFTTrainer(
 )
 sft_stats = sft_trainer.train()
 print(f'SFT done. Loss: {sft_stats.training_loss:.4f}')
-model.save_pretrained(SFT_DIR)
-tokenizer.save_pretrained(SFT_DIR)
+# Save ONLY LoRA adapters for SFT (no merged weights)
+LORA_DIR = '/kaggle/working/sft_lora_adapter'
+print(f'Saving SFT LoRA adapters to {LORA_DIR}...')
+model.save_pretrained(LORA_DIR)
+tokenizer.save_pretrained(LORA_DIR)
 
-HF_REPO = 'Abhinav-hf/qwen-grpo-sft-trained-16bit'
-
+SFT_LORA_REPO = 'Abhinav-hf/qwen-sft-lora-adapter'
 if HF_TOKEN:
-    print(f'Pushing seamlessly compiled SFT 16-bit model to Hub: {HF_REPO}')
-    model.push_to_hub_merged(HF_REPO, tokenizer, save_method='merged_16bit', token=HF_TOKEN)
-    print(f'SFT Hub upload complete. GRPO will now commence and overwrite the main weights once finished.')
+    print(f'Pushing SFT LoRA adapters to Hub: {SFT_LORA_REPO}')
+    model.push_to_hub(SFT_LORA_REPO, token=HF_TOKEN)
+    tokenizer.push_to_hub(SFT_LORA_REPO, token=HF_TOKEN)
+    print(f'SFT LoRA adapters available at: https://huggingface.co/{SFT_LORA_REPO}')
 else:
     print('No HF_TOKEN detected — skipping SFT Hub upload.')
 
@@ -541,22 +543,19 @@ print(f"Final avg reward (last 20): "
 
 
 # ==============================================================================
-# 5. EXPORT / PUSH TO HUGGINGFACE HUB
+# 5. EXPORT / PUSH TO HUGGINGFACE HUB (LoRA adapters ONLY — no merged weights)
 # ==============================================================================
 
-LOCAL_MERGED_DIR = '/kaggle/working/qwen-merged-16bit'
-print(f'Saving completely merged 16-bit GRPO model locally to {LOCAL_MERGED_DIR}...')
+print(f'Saving final GRPO LoRA adapters to {GRPO_DIR}...')
+model.save_pretrained(GRPO_DIR)
+tokenizer.save_pretrained(GRPO_DIR)
 
-model.save_pretrained_merged(
-    LOCAL_MERGED_DIR,
-    tokenizer,
-    save_method='merged_16bit'
-)
-HF_REPO = 'Abhinav-hf/qwen-grpo-complete-trained-16bit'
+GRPO_LORA_REPO = 'Abhinav-hf/qwen-grpo-complete-trained-16bit'
 if HF_TOKEN:
-    print(f'Pushing seamlessly compiled GRPO model to Hub: {HF_REPO}')
-    model.push_to_hub_merged(HF_REPO, tokenizer, save_method='merged_16bit', token=HF_TOKEN)
-    print(f'Done! Final GRPO Model available at: https://huggingface.co/{HF_REPO}')
+    print(f'Pushing GRPO LoRA adapters to Hub: {GRPO_LORA_REPO}')
+    model.push_to_hub(GRPO_LORA_REPO, token=HF_TOKEN)
+    tokenizer.push_to_hub(GRPO_LORA_REPO, token=HF_TOKEN)
+    print(f'Done! GRPO LoRA adapters available at: https://huggingface.co/{GRPO_LORA_REPO}')
 else:
     print('No HF_TOKEN detected — skipping Hub upload. Local save complete.')
 
