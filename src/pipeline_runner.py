@@ -52,7 +52,7 @@ def apply_filter(df: pd.DataFrame, filter_condition: str) -> pd.DataFrame:
             except Exception:
                 pass
 
-    # Unknown filter — return unchanged (log-worthy in production)
+    # Unknown filter — return unchanged (log-worthy in production) 
     return df
 
 
