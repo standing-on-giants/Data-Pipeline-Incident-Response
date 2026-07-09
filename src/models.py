@@ -19,7 +19,7 @@ class AssertionResult(BaseModel):
     expected: str
     actual: str
     passed: bool
-    failing_row_count: int = 0
+    failing_row_count: int = 0 
 
 
 class DAGNode(BaseModel):
