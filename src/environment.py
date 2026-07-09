@@ -16,7 +16,7 @@ from src.models import (
     AssertionResult, DAGNode, HistoricalRun,
     PipelineAction, PipelineObservation, StepResult,
 )
-from src.assertions import check_assertion
+from src.assertions import check_assertion 
 from src.pipeline_runner import execute_pipeline
 from src.tasks import get_task
 
