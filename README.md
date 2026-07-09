@@ -14,7 +14,7 @@ license: mit
 
 # Data Pipeline Incident Response — OpenEnv
 
-An RL environment where an agent acts as an on-call Data Engineer, diagnosing broken pipelines, investigating data quality issues, and applying root-cause fixes.
+An RL environment where an agent acts as an on-call Data Engineer, diagnosing broken pipelines, investigating data quality issues, and applying root-cause fixes. 
 
 ---
 
