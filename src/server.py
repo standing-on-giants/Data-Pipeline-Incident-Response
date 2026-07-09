@@ -79,7 +79,7 @@ async def websocket_endpoint(websocket: WebSocket):
             # ---- STATE ----
             elif action_field == "state":
                 if env is None:
-                    await _send_error(websocket, "Call reset first.")
+                    await _send_error(websocket, "Call reset first.") 
                     continue
                 await websocket.send_text(json.dumps({"state": env.state()}))
 
