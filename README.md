@@ -9,7 +9,7 @@ tags:
   - data-engineering
   - rl-environment
   - agentic
-license: mit
+license: MIT
 ---
 
 # Data Pipeline Incident Response — OpenEnv
