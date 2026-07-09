@@ -137,7 +137,7 @@ def make_medium_task() -> Dict[str, Any]:
     })
 
     return {
-        "task_id":    "medium",
+        "task_id":    "medium", 
         "difficulty": "medium",
         "description": (
             "Two assertions are failing in your order-items pipeline. "
