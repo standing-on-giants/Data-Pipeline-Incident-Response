@@ -113,7 +113,7 @@ def check_assertion(
             # Only flag values that are non-null AND cannot be parsed as a number
             non_null = df[col].dropna()
             bad = int(pd.to_numeric(non_null, errors="coerce").isna().sum())
-        else:
+        else: 
             bad = 0
         passed = bad == 0
         return AssertionResult(
